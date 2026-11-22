@@ -54,13 +54,16 @@
 
 #include "infineon_logo.h"
 
+#include "mic_task.h"
+#include "mic_hud.h"
+
 
 /*******************************************************************************
 * Macros
 *******************************************************************************/
 #define GFX_TASK_NAME                       ("CM55 Gfx Task")
 /* stack size in words */
-#define GFX_TASK_STACK_SIZE                 (configMINIMAL_STACK_SIZE * 3)
+#define GFX_TASK_STACK_SIZE                 (configMINIMAL_STACK_SIZE * 4)
 
 #define GFX_TASK_PRIORITY                   (configMAX_PRIORITIES - 1)
 
@@ -83,6 +86,21 @@
  */
 #define LPTIMER_1_WAIT_TIME_USEC            (62U)
 
+/* Idle wait of the GFX task between button checks. Without it the
+ * highest-priority task spins and starves the microphone task. */
+#define GFX_TASK_POLL_DELAY_MS              (20U)
+
+/* Visible width of the Waveshare 4.3" panel; the buffer stride is IMAGE_WIDTH */
+#define DISPLAY_VISIBLE_WIDTH               (800U)
+
+/* 4-microphone VU panel: task priority (below graphics), refresh period and
+ * position (right half, between the DPS368 panel at the top and the BMM350
+ * band at the bottom so the sensor PRs do not overlap when merged). */
+#define MIC_TASK_PRIORITY                   (configMAX_PRIORITIES - 2)
+#define MIC_HUD_REFRESH_MS                  (50U)
+#define MIC_HUD_X                           (384U)
+#define MIC_HUD_Y                           (200U)
+
 /* Define the LPTimer interrupt priority number. '1' implies highest priority.
  */
 #define APP_LPTIMER_INTERRUPT_PRIORITY      (1U)
@@ -96,6 +114,9 @@ GFXSS_Type* base = (GFXSS_Type*) GFXSS;
 cy_stc_gfx_context_t gfx_context;
 
 volatile bool user_button_flag = false;
+
+/* true while the DSI data lane is in ULPM: the mic HUD is not redrawn */
+static bool dsi_in_ulpm = false;
 
 CY_SECTION(".cy_gpu_buf") uint8_t graphics_buffer[IMAGE_SIZE] = {0xFF};
 
@@ -282,17 +303,50 @@ static void button_isr_handler(void)
         NVIC_ClearPendingIRQ(CYBSP_USER_BTN_IRQ);
     }
 
-    /* USER_BTN2 pin is present on the same GPIO port as USER_BTN1 pin */
-    /* This cause the ISR to execute even when USER_BTN2 is pressed accidentally */
-    /* To handle such scenarios we clear the interrupt */
+    /* USER_BTN2 pin is present on the same GPIO port as USER_BTN1 pin and
+     * shares its IRQ line; it toggles the microphone wake mode here.
+     */
     
     /* Check if USER_BTN2 was pressed */
     if(1UL == Cy_GPIO_GetInterruptStatus(CYBSP_USER_BTN2_PORT, CYBSP_USER_BTN2_PIN))
     {
+        /* USER BTN2: always-on <-> wake mode (PDM off until analog VAD) */
+        mic_task_request_mode_toggle();
+
         /* Clear the USER_BTN2 interrupt */
         Cy_GPIO_ClearInterrupt(CYBSP_USER_BTN2_PORT, CYBSP_USER_BTN2_PIN);
         NVIC_ClearPendingIRQ(CYBSP_USER_BTN2_IRQ);
     }
+}
+
+
+/*******************************************************************************
+* Function Name: mic_hud_update
+********************************************************************************
+* Summary:
+*   Renders the latest 4-channel microphone levels into the frame buffer.
+*   Single buffered: a little tearing is acceptable for this demo.
+*
+* Parameters:
+*  void
+*
+* Return:
+*  void
+*******************************************************************************/
+static void mic_hud_update(void)
+{
+    mic_hud_view_t view;
+
+    mic_task_get_view(&view);
+
+    mic_hud_draw((uint16_t *) graphics_buffer, IMAGE_WIDTH, DISPLAY_VISIBLE_WIDTH,
+                 IMAGE_HEIGHT, MIC_HUD_X, MIC_HUD_Y, &view);
+
+#if defined(__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
+    /* Make the CPU writes visible to the display controller */
+    SCB_CleanDCache_by_Addr((volatile void *) &graphics_buffer[MIC_HUD_Y * IMAGE_WIDTH * COLOR_DEPTH],
+                            (int32_t) (MIC_HUD_HEIGHT * IMAGE_WIDTH * COLOR_DEPTH));
+#endif
 }
 
 
@@ -306,6 +360,8 @@ static void button_isr_handler(void)
 *       - Initializes "Waveshare 4.3-inch DSI LCD panel".
 *       - Display the Infineon logo and based on USER BTN1 press, exercises
 *         MIPI DSI ULPM.
+*       - Starts the 4-microphone task (2x PDM + 2x analog) and draws a VU
+*         panel with sound activity / wake status.
 *
 * Parameters:
 *  void *arg (unused)
@@ -323,6 +379,7 @@ static void cm55_ns_gfx_task(void *arg)
     cy_rslt_t panel_status = CY_RSLT_SUCCESS;
     volatile cy_en_gfx_status_t status;
     volatile cy_en_mipidsi_status_t mipi_status;
+    TickType_t last_hud;
     cy_en_sysint_status_t sysint_status = CY_SYSINT_SUCCESS;
 
     /* Initial delay to allow debounce delays to settle */
@@ -393,6 +450,14 @@ static void cm55_ns_gfx_task(void *arg)
 
     memcpy(graphics_buffer, img_ptr, sizeof(img_ptr));
 
+    /* Start the microphones: 2x PDM (P8.5/P8.6) + 2x analog (CTB, P14) */
+    if (CY_RSLT_SUCCESS != mic_task_start(MIC_TASK_PRIORITY))
+    {
+        printf("Microphone task creation failed\r\n");
+    }
+
+    mic_hud_update();
+
     /* Set the frame buffer with the image pointer to be displayed on LCD */
     status = Cy_GFXSS_Set_FrameBuffer(base, (uint32_t*)graphics_buffer, &gfx_context);
 
@@ -408,10 +473,20 @@ static void cm55_ns_gfx_task(void *arg)
 
     user_button_flag = false;
 
-    printf("Press USER BTN1 button to enter ULPM\r\n\n");
+    printf("Press USER BTN1 button to enter ULPM\r\n");
+    printf("Press USER BTN2 button to toggle microphone wake mode\r\n\n");
+
+    last_hud = xTaskGetTickCount();
 
     for (;;)
     {
+        if ((!dsi_in_ulpm) &&
+            ((xTaskGetTickCount() - last_hud) >= pdMS_TO_TICKS(MIC_HUD_REFRESH_MS)))
+        {
+            last_hud = xTaskGetTickCount();
+            mic_hud_update();
+        }
+
         /* Check for the USER BTN1 interrupt status */
         if (user_button_flag)
         {
@@ -432,6 +507,7 @@ static void cm55_ns_gfx_task(void *arg)
                 handle_app_error();
             }
 
+            dsi_in_ulpm = true;
             Cy_GPIO_Write(CYBSP_USER_LED_PORT, CYBSP_USER_LED_PIN, GPIO_HIGH);
 
             vTaskDelay(pdMS_TO_TICKS(DSI_ULPM_TIME_INTERVAL_MS));
@@ -444,12 +520,16 @@ static void cm55_ns_gfx_task(void *arg)
                 handle_app_error();
             }
 
+            dsi_in_ulpm = false;
             Cy_GPIO_Write(CYBSP_USER_LED_PORT, CYBSP_USER_LED_PIN, GPIO_LOW);
             printf("Exited ULPM with SUCCESS: Press to enter again ULPM\r\n\n");
 
             /* Clear USER BTN1 interrupt flag */
             user_button_flag = false;
         }
+
+        /* Yield so lower-priority tasks (microphones, idle) can run */
+        vTaskDelay(pdMS_TO_TICKS(GFX_TASK_POLL_DELAY_MS));
     }
 }
 
