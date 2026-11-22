@@ -39,6 +39,9 @@
 /*******************************************************************************
 * Header Files
 *******************************************************************************/
+#include <stdio.h>
+#include <string.h>
+
 #include "cy_graphics.h"
 
 #include "cy_time.h"
@@ -54,13 +57,17 @@
 
 #include "infineon_logo.h"
 
+#include "sht40_env.h"
+#include "sht40_hud.h"
+
 
 /*******************************************************************************
 * Macros
 *******************************************************************************/
 #define GFX_TASK_NAME                       ("CM55 Gfx Task")
 /* stack size in words */
-#define GFX_TASK_STACK_SIZE                 (configMINIMAL_STACK_SIZE * 3)
+/* Increased from 3x to 5x for snprintf used by the SHT40 overlay */
+#define GFX_TASK_STACK_SIZE                 (configMINIMAL_STACK_SIZE * 5)
 
 #define GFX_TASK_PRIORITY                   (configMAX_PRIORITIES - 1)
 
@@ -83,6 +90,18 @@
  */
 #define LPTIMER_1_WAIT_TIME_USEC            (62U)
 
+/* Idle wait of the GFX task between button checks. Without it the
+ * highest-priority GFX task spins and starves the SHT40 sensor task. */
+#define GFX_TASK_POLL_DELAY_MS              (20U)
+
+/* SHT40 temperature / humidity: sensor task priority (below the graphics
+ * task), overlay refresh period and position. The panel sits on the left,
+ * between the top-left and bottom areas used by the other sensor demos. */
+#define SHT40_TASK_PRIORITY                 (configMAX_PRIORITIES - 2)
+#define SHT40_HUD_REFRESH_MS                (1000U)
+#define SHT40_HUD_X                         (16U)
+#define SHT40_HUD_Y                         (196U)
+
 /* Define the LPTimer interrupt priority number. '1' implies highest priority.
  */
 #define APP_LPTIMER_INTERRUPT_PRIORITY      (1U)
@@ -96,6 +115,9 @@ GFXSS_Type* base = (GFXSS_Type*) GFXSS;
 cy_stc_gfx_context_t gfx_context;
 
 volatile bool user_button_flag = false;
+
+/* true while the DSI data lane is in ULPM: the SHT40 overlay is not redrawn */
+static bool dsi_in_ulpm = false;
 
 CY_SECTION(".cy_gpu_buf") uint8_t graphics_buffer[IMAGE_SIZE] = {0xFF};
 
@@ -297,6 +319,74 @@ static void button_isr_handler(void)
 
 
 /*******************************************************************************
+* Function Name: sht40_hud_update
+********************************************************************************
+* Summary:
+*   Draws the latest SHT40 state (T, RH, dew point, lens fog level, battery
+*   heater request) into the frame buffer, flushes the D-cache for the panel
+*   lines and logs the values on the UART.
+*
+* Parameters:
+*  log_uart : true to also print the values
+*
+* Return:
+*  void
+*
+*******************************************************************************/
+static void sht40_hud_update(bool log_uart)
+{
+    sht40_state_t st;
+    sht40_hud_view_t view;
+
+    sht40_env_get_state(&st);
+
+    switch (st.status)
+    {
+        case SHT40_STATUS_OK:        view.mode = SHT40_HUD_MODE_DATA;      break;
+        case SHT40_STATUS_HEATING:   view.mode = SHT40_HUD_MODE_HEATING;   break;
+        case SHT40_STATUS_NO_SENSOR: view.mode = SHT40_HUD_MODE_NO_SENSOR; break;
+        case SHT40_STATUS_ERROR:     view.mode = SHT40_HUD_MODE_ERROR;     break;
+        case SHT40_STATUS_INIT:
+        default:                     view.mode = SHT40_HUD_MODE_WAIT;      break;
+    }
+
+    view.temperature_c  = st.temperature_c;
+    view.humidity_pct   = st.humidity_pct;
+    view.dew_point_c    = st.dew_point_c;
+    view.fog_level      = st.fog_level;
+    view.batt_heater_on = st.batt_heater_on;
+
+    sht40_hud_draw((uint16_t*)graphics_buffer, IMAGE_WIDTH, IMAGE_HEIGHT,
+                   SHT40_HUD_X, SHT40_HUD_Y, &view);
+
+#if defined(__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
+    /* Make the CPU writes visible to the display controller (whole lines) */
+    SCB_CleanDCache_by_Addr((volatile void*)&graphics_buffer[SHT40_HUD_Y * IMAGE_WIDTH * COLOR_DEPTH],
+                            (int32_t)(SHT40_HUD_HEIGHT * IMAGE_WIDTH * COLOR_DEPTH));
+#endif
+
+    if (log_uart && ((SHT40_STATUS_OK == st.status) || (SHT40_STATUS_HEATING == st.status)))
+    {
+        char t[12], rh[12], td[12], tf[12], ah[12], mg[12];
+
+        /* newlib-nano printf has no float support: format by hand */
+        (void)sht40_format_fixed(t,  sizeof(t),  st.temperature_c, 2U, false);
+        (void)sht40_format_fixed(rh, sizeof(rh), st.humidity_pct, 2U, false);
+        (void)sht40_format_fixed(td, sizeof(td), st.dew_point_c, 2U, false);
+        (void)sht40_format_fixed(tf, sizeof(tf), st.frost_point_c, 2U, false);
+        (void)sht40_format_fixed(ah, sizeof(ah), st.abs_humidity_gm3, 2U, false);
+        (void)sht40_format_fixed(mg, sizeof(mg), st.fog_margin_c, 1U, true);
+
+        printf("SHT40: T = %s C, RH = %s %%, Td = %s C, Tf = %s C, AH = %s g/m3, "
+               "lens margin = %s C, fog = %s, batt heater = %s%s\r\n",
+               t, rh, td, tf, ah, mg, sht40_fog_level_str(st.fog_level),
+               st.batt_heater_on ? "ON" : "OFF",
+               (SHT40_STATUS_HEATING == st.status) ? " (sensor heater)" : "");
+    }
+}
+
+
+/*******************************************************************************
 * Function Name: cm55_ns_gfx_task
 ********************************************************************************
 * Summary:
@@ -324,6 +414,8 @@ static void cm55_ns_gfx_task(void *arg)
     volatile cy_en_gfx_status_t status;
     volatile cy_en_mipidsi_status_t mipi_status;
     cy_en_sysint_status_t sysint_status = CY_SYSINT_SUCCESS;
+    TickType_t last_hud;
+    sht40_status_t last_status = SHT40_STATUS_INIT;
 
     /* Initial delay to allow debounce delays to settle */
     Cy_SysLib_Delay(INITIAL_BTN_DEBOUNCE_DELAY);
@@ -393,6 +485,18 @@ static void cm55_ns_gfx_task(void *arg)
 
     memcpy(graphics_buffer, img_ptr, sizeof(img_ptr));
 
+    /* Start the SHT40 temperature / humidity task. It reuses the I2C
+     * controller (and its interrupt) that was just used to bring up the
+     * display. A missing sensor is not fatal: the overlay shows NO SENSOR. */
+    if (CY_RSLT_SUCCESS != sht40_env_start(CYBSP_I2C_CONTROLLER_HW,
+                                           &disp_i2c_controller_context,
+                                           SHT40_TASK_PRIORITY))
+    {
+        printf("SHT40 task creation failed\r\n");
+    }
+
+    sht40_hud_update(false);
+
     /* Set the frame buffer with the image pointer to be displayed on LCD */
     status = Cy_GFXSS_Set_FrameBuffer(base, (uint32_t*)graphics_buffer, &gfx_context);
 
@@ -410,8 +514,26 @@ static void cm55_ns_gfx_task(void *arg)
 
     printf("Press USER BTN1 button to enter ULPM\r\n\n");
 
+    last_hud = xTaskGetTickCount();
+
     for (;;)
     {
+        /* Refresh the SHT40 overlay and UART log once per second, and at once
+         * when the sensor status changes (e.g. first sample, NO SENSOR). */
+        if (!dsi_in_ulpm)
+        {
+            sht40_state_t st;
+
+            sht40_env_get_state(&st);
+            if ((st.status != last_status) ||
+                ((xTaskGetTickCount() - last_hud) >= pdMS_TO_TICKS(SHT40_HUD_REFRESH_MS)))
+            {
+                last_status = st.status;
+                last_hud = xTaskGetTickCount();
+                sht40_hud_update(true);
+            }
+        }
+
         /* Check for the USER BTN1 interrupt status */
         if (user_button_flag)
         {
@@ -432,6 +554,7 @@ static void cm55_ns_gfx_task(void *arg)
                 handle_app_error();
             }
 
+            dsi_in_ulpm = true;
             Cy_GPIO_Write(CYBSP_USER_LED_PORT, CYBSP_USER_LED_PIN, GPIO_HIGH);
 
             vTaskDelay(pdMS_TO_TICKS(DSI_ULPM_TIME_INTERVAL_MS));
@@ -444,12 +567,15 @@ static void cm55_ns_gfx_task(void *arg)
                 handle_app_error();
             }
 
+            dsi_in_ulpm = false;
             Cy_GPIO_Write(CYBSP_USER_LED_PORT, CYBSP_USER_LED_PIN, GPIO_LOW);
             printf("Exited ULPM with SUCCESS: Press to enter again ULPM\r\n\n");
 
             /* Clear USER BTN1 interrupt flag */
             user_button_flag = false;
         }
+
+        vTaskDelay(pdMS_TO_TICKS(GFX_TASK_POLL_DELAY_MS));
     }
 }
 
