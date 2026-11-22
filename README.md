@@ -97,6 +97,28 @@ See [Using the code example](docs/using_the_code_example.md) for instructions on
    ![](images/dsi-ulpm-exit-terminal-output.png)
 
 
+## Audio output: TLV320DAC3100 DAC + speaker (HUD goggle prototype)
+
+The CM55 application also drives the on-board TI TLV320DAC3100 audio DAC and plays prompt tones and pre-recorded Traditional Chinese voice prompts. **Not yet verified on hardware.**
+
+Item | Setting
+---- | -------
+Control | I2C address 0x18 on `CYBSP_I2C_CONTROLLER` (SCB0, P8.0 SCL / P8.1 SDA, shared with the display and sensors)
+Audio | I2S on TDM0 TX, E84 is master: MCLK P21.3, BCLK P21.2, DIN P21.1, WS P12.3. BSP `CYBSP_TDM_CONTROLLER_0`: 16 bit, 2 channels, MCLK 2.048 MHz, 16 kHz
+Outputs | Class-D speaker (J8 on KIT_PSE84_AI, not fitted by default, max. 2.5 W) and headphone HPL/HPR. Same pins on KIT_PSE84_EVAL
+DAC clock | Codec PLL from MCLK: P 1, R 1, J 40 (81.92 MHz), NDAC 2, MDAC 8, DOSR 320, PRB_P25. `DEFINES+=AUDIO_DAC_USE_PLL=0` falls back to the Infineon library setting (MCLK direct, DOSR 128, PRB_P1)
+
+- **USER BTN2** plays the next demo item: spoken speed (時速三十二公里), altitude (海拔兩千三百五十公尺), battery (電量百分之八十五), heading (方位東北), low battery, tracker connected, link lost, new message, PTT start/end tones, fog warning, battery heating, compass calibrated, error tone, and SOS (urgent, cuts the current prompt). **USER BTN1** gives a click tone before entering ULPM. A boot chime and "雪鏡已啟動" play at start-up
+- Tone prompts are synthesized (sine with sweep and 4 ms / 8 ms attack / release, no clicks): BOOT, CLICK, CONFIRM, WARNING, LOW_BATTERY, PTT_START, PTT_END, MESSAGE, SOS, ERROR
+- Voice prompts: 38 clips (9 phrases, 7 words, 14 number words, 8 compass directions), 21 s, 168 kB of 4-bit IMA ADPCM. Numbers 0..9999 are spoken by joining word clips with Taiwan usage (兩百, 一百零五, 十二). The clips are a placeholder voice from offline TTS (sherpa-onnx + MeloTTS zh_en, MIT); replace them with studio recordings: put 16 kHz mono WAV files named after `tools/audio_clips/prompts.csv` in a folder and run `python3 tools/audio_clips/wav2c.py --wav <folder>`
+- API (*proj_cm55/audio/audio_player.h*), thread-safe through a queue: `audio_play_tone()`, `audio_play_clip()`, `audio_play_tone_and_clip()`, `audio_say_speed_kmh()`, `audio_say_altitude_m()`, `audio_say_battery_pct()`, `audio_say_heading_deg()`, `audio_play()` for custom sequences, `audio_stop()`, `audio_set_volume()` (0..10, 3 dB steps, DAC digital volume). `AUDIO_PRIO_URGENT` cuts the current prompt
+- Power: after a prompt the DAC is muted; after 1.5 s idle the I2S stream (MCLK) stops and the Class-D amplifier is powered down. The next request wakes it in about 10 ms (codec PLL relock)
+- Audio task priority is below the graphics task; the graphics task now waits 20 ms per loop (`GFX_TASK_POLL_DELAY_MS`) so it does not starve the audio task
+- If the DAC does not answer, UART shows `AUDIO: TLV320DAC3100 not answering` and the DSI ULPM demo continues; each new request retries the DAC
+- All settings are in *proj_cm55/audio/audio_config.h* (`DEFINES+=...` from *proj_cm55/Makefile*): output (speaker / headphone / both), speaker gain 6..24 dB, default volume, idle power-down time
+- Host unit test (TLV320DAC3100 clock search and register sequence, synthesizer, ADPCM, number words, sequences; no ModusToolbox needed): `make -C tools/audio_host_test run`; `make -C tools/audio_host_test wav` renders every prompt to *prompts_demo.wav*
+
+
 ## Related resources
 
 Resources  | Links
