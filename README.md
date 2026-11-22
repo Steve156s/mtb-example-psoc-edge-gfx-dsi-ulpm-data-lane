@@ -97,6 +97,23 @@ See [Using the code example](docs/using_the_code_example.md) for instructions on
    ![](images/dsi-ulpm-exit-terminal-output.png)
 
 
+## DPS368 barometer altitude overlay (HUD goggle prototype)
+
+The CM55 application also reads the on-board XENSIV&trade; DPS368 barometric pressure sensor (I2C address 0x77 on `CYBSP_I2C_CONTROLLER`, shared with the display) through the [sensor-xensiv-dps3xx](https://github.com/Infineon/sensor-xensiv-dps3xx) library and overlays the result in the top-left corner of the LCD:
+
+Line | Content
+---- | -------
+`ALT` | Absolute altitude in m, international barometric formula against `BARO_SEA_LEVEL_HPA` (default 1013.25 hPa)
+`REL` | Altitude relative to the reference point in m (zeroed at start-up and on **USER BTN2** press)
+`P`   | Filtered pressure in hPa
+`T`   | Sensor temperature in &deg;C
+
+- The sensor runs in background mode: pressure 16x oversampling at 8 Hz, temperature 1x at 1 Hz. The main loop samples every 200 ms, applies an exponential moving average (`BARO_FILTER_ALPHA`) and refreshes the overlay and UART log once per second
+- If the sensor does not respond, the overlay shows `NO SENSOR` and the DSI ULPM demo continues
+- Override `BARO_SEA_LEVEL_HPA` (e.g. `DEFINES+=BARO_SEA_LEVEL_HPA=1020.0f` in *proj_cm55/Makefile*) or call `baro_set_sea_level()` with the local QNH for an accurate absolute altitude
+- Sources: *proj_cm55/barometer.c/.h* (sensor + altitude), *proj_cm55/hud_text.c/.h* (5x7 bitmap text renderer for the RGB565 frame buffer)
+
+
 ## Related resources
 
 Resources  | Links
