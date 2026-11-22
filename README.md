@@ -109,9 +109,10 @@ Line | Content
 `T`   | Sensor temperature in &deg;C
 
 - The sensor runs in background mode: pressure 16x oversampling at 8 Hz, temperature 1x at 1 Hz. The main loop samples every 200 ms, applies an exponential moving average (`BARO_FILTER_ALPHA`) and refreshes the overlay and UART log once per second
+- All DPS368 transactions take the shared I2C bus mutex (*proj_cm55/i2c_bus.c/.h*, identical to the BMI270 PR) because the display and other sensors use the same bus
 - If the sensor does not respond, the overlay shows `NO SENSOR` and the DSI ULPM demo continues
 - Override `BARO_SEA_LEVEL_HPA` (e.g. `DEFINES+=BARO_SEA_LEVEL_HPA=1020.0f` in *proj_cm55/Makefile*) or call `baro_set_sea_level()` with the local QNH for an accurate absolute altitude
-- Sources: *proj_cm55/barometer.c/.h* (sensor + altitude), *proj_cm55/hud_text.c/.h* (5x7 bitmap text renderer for the RGB565 frame buffer)
+- Sources: *proj_cm55/baro/barometer.c/.h* (sensor + altitude), *proj_cm55/baro/baro_text.c/.h* (5x7 bitmap text renderer for the RGB565 frame buffer)
 
 
 ## Related resources

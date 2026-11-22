@@ -1,5 +1,5 @@
 /*******************************************************************************
-* File Name        : hud_text.c
+* File Name        : baro_text.c
 *
 * Description      : Minimal RGB565 text renderer (5x7 bitmap font) for the
 *                    barometer overlay. Only the glyphs needed by the HUD are
@@ -10,15 +10,15 @@
 #include <string.h>
 
 #include "cy_pdl.h"
-#include "hud_text.h"
+#include "baro_text.h"
 
 typedef struct
 {
     char    ch;
-    uint8_t rows[HUD_FONT_H];   /* bit4 = leftmost pixel */
-} hud_glyph_t;
+    uint8_t rows[BARO_TXT_FONT_H];   /* bit4 = leftmost pixel */
+} baro_txt_glyph_t;
 
-static const hud_glyph_t hud_font[] =
+static const baro_txt_glyph_t baro_txt_font[] =
 {
     { '0', { 0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E } },
     { '1', { 0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E } },
@@ -53,20 +53,20 @@ static const hud_glyph_t hud_font[] =
     { 'm', { 0x00, 0x00, 0x1A, 0x15, 0x15, 0x11, 0x11 } },
 };
 
-static const uint8_t* hud_find_glyph(char ch)
+static const uint8_t* baro_txt_find_glyph(char ch)
 {
-    for (size_t i = 0U; i < (sizeof(hud_font) / sizeof(hud_font[0])); i++)
+    for (size_t i = 0U; i < (sizeof(baro_txt_font) / sizeof(baro_txt_font[0])); i++)
     {
-        if (hud_font[i].ch == ch)
+        if (baro_txt_font[i].ch == ch)
         {
-            return hud_font[i].rows;
+            return baro_txt_font[i].rows;
         }
     }
     return NULL;
 }
 
 
-void hud_fill_rect(const hud_surface_t* s, uint32_t x, uint32_t y,
+void baro_txt_fill_rect(const baro_txt_surface_t* s, uint32_t x, uint32_t y,
                    uint32_t w, uint32_t h, uint16_t color)
 {
     if ((x >= s->width) || (y >= s->height))
@@ -94,7 +94,7 @@ void hud_fill_rect(const hud_surface_t* s, uint32_t x, uint32_t y,
 
 
 /* Returns the x coordinate after the last drawn character */
-uint32_t hud_draw_text(const hud_surface_t* s, uint32_t x, uint32_t y,
+uint32_t baro_txt_draw_text(const baro_txt_surface_t* s, uint32_t x, uint32_t y,
                        const char* text, uint16_t fg, uint16_t bg,
                        uint32_t scale)
 {
@@ -105,27 +105,27 @@ uint32_t hud_draw_text(const hud_surface_t* s, uint32_t x, uint32_t y,
 
     for (; '\0' != *text; text++)
     {
-        const uint8_t* rows = hud_find_glyph(*text);
+        const uint8_t* rows = baro_txt_find_glyph(*text);
 
         /* Background of the full character cell incl. 1 column spacing */
-        hud_fill_rect(s, x, y, HUD_CHAR_ADVANCE(scale), HUD_FONT_H * scale, bg);
+        baro_txt_fill_rect(s, x, y, BARO_TXT_CHAR_ADVANCE(scale), BARO_TXT_FONT_H * scale, bg);
 
         if (NULL != rows)
         {
-            for (uint32_t r = 0U; r < HUD_FONT_H; r++)
+            for (uint32_t r = 0U; r < BARO_TXT_FONT_H; r++)
             {
-                for (uint32_t c = 0U; c < HUD_FONT_W; c++)
+                for (uint32_t c = 0U; c < BARO_TXT_FONT_W; c++)
                 {
                     if (0U != (rows[r] & (0x10U >> c)))
                     {
-                        hud_fill_rect(s, x + (c * scale), y + (r * scale),
+                        baro_txt_fill_rect(s, x + (c * scale), y + (r * scale),
                                       scale, scale, fg);
                     }
                 }
             }
         }
 
-        x += HUD_CHAR_ADVANCE(scale);
+        x += BARO_TXT_CHAR_ADVANCE(scale);
     }
 
     return x;
@@ -134,7 +134,7 @@ uint32_t hud_draw_text(const hud_surface_t* s, uint32_t x, uint32_t y,
 
 /* Writes back the D-cache for the given region so the display controller
  * (bus master) sees the new pixels. */
-void hud_flush(const hud_surface_t* s, uint32_t x, uint32_t y,
+void baro_txt_flush(const baro_txt_surface_t* s, uint32_t x, uint32_t y,
                uint32_t w, uint32_t h)
 {
 #if defined(__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
@@ -167,7 +167,7 @@ void hud_flush(const hud_surface_t* s, uint32_t x, uint32_t y,
 
 /* Formats a float as fixed point without relying on printf float support
  * (newlib-nano). Returns the string length. */
-size_t hud_format_fixed(char* buf, size_t buf_len, float value,
+size_t baro_txt_format_fixed(char* buf, size_t buf_len, float value,
                         uint32_t decimals, int force_sign)
 {
     static const uint32_t pow10[] = { 1U, 10U, 100U, 1000U };

@@ -58,7 +58,8 @@
 #include "infineon_logo.h"
 
 #include "barometer.h"
-#include "hud_text.h"
+#include "baro_text.h"
+#include "i2c_bus.h"
 
 
 /*******************************************************************************
@@ -90,8 +91,8 @@
 #define BARO_HUD_LINES                      (4U)
 #define BARO_HUD_COLS                       (16U)
 #define BARO_HUD_PAD                        (8U)
-#define BARO_HUD_W                          ((BARO_HUD_COLS * HUD_CHAR_ADVANCE(BARO_HUD_SCALE)) + (2U * BARO_HUD_PAD))
-#define BARO_HUD_H                          ((BARO_HUD_LINES * HUD_LINE_ADVANCE(BARO_HUD_SCALE)) + (2U * BARO_HUD_PAD))
+#define BARO_HUD_W                          ((BARO_HUD_COLS * BARO_TXT_CHAR_ADVANCE(BARO_HUD_SCALE)) + (2U * BARO_HUD_PAD))
+#define BARO_HUD_H                          ((BARO_HUD_LINES * BARO_TXT_LINE_ADVANCE(BARO_HUD_SCALE)) + (2U * BARO_HUD_PAD))
 
 #define SET_VAL                             (1U)
 
@@ -127,7 +128,7 @@ volatile bool user_button2_flag = false;
 CY_SECTION(".cy_gpu_buf") uint8_t graphics_buffer[IMAGE_SIZE] = {0xFF};
 
 /* Frame buffer view used by the barometer overlay */
-static const hud_surface_t hud_surface =
+static const baro_txt_surface_t baro_surface =
 {
     .pixels = (uint16_t*)graphics_buffer,
     .width  = IMAGE_WIDTH,
@@ -352,42 +353,42 @@ static void baro_hud_draw(const baro_data_t* data)
     char line[BARO_HUD_COLS + 1U];
     uint32_t x = BARO_HUD_X + BARO_HUD_PAD;
     uint32_t y = BARO_HUD_Y + BARO_HUD_PAD;
-    const uint32_t dy = HUD_LINE_ADVANCE(BARO_HUD_SCALE);
+    const uint32_t dy = BARO_TXT_LINE_ADVANCE(BARO_HUD_SCALE);
 
-    hud_fill_rect(&hud_surface, BARO_HUD_X, BARO_HUD_Y, BARO_HUD_W, BARO_HUD_H,
-                  HUD_COLOR_BLACK);
+    baro_txt_fill_rect(&baro_surface, BARO_HUD_X, BARO_HUD_Y, BARO_HUD_W, BARO_HUD_H,
+                  BARO_TXT_COLOR_BLACK);
 
     if (NULL == data)
     {
-        hud_draw_text(&hud_surface, x, y, "DPS368", HUD_COLOR_WHITE,
-                      HUD_COLOR_BLACK, BARO_HUD_SCALE);
-        hud_draw_text(&hud_surface, x, y + dy, "NO SENSOR", HUD_COLOR_RED,
-                      HUD_COLOR_BLACK, BARO_HUD_SCALE);
+        baro_txt_draw_text(&baro_surface, x, y, "DPS368", BARO_TXT_COLOR_WHITE,
+                      BARO_TXT_COLOR_BLACK, BARO_HUD_SCALE);
+        baro_txt_draw_text(&baro_surface, x, y + dy, "NO SENSOR", BARO_TXT_COLOR_RED,
+                      BARO_TXT_COLOR_BLACK, BARO_HUD_SCALE);
     }
     else
     {
-        hud_format_fixed(num, sizeof(num), data->altitude_m, 1U, 0);
+        baro_txt_format_fixed(num, sizeof(num), data->altitude_m, 1U, 0);
         snprintf(line, sizeof(line), "ALT %9s m", num);
-        hud_draw_text(&hud_surface, x, y, line, HUD_COLOR_GREEN,
-                      HUD_COLOR_BLACK, BARO_HUD_SCALE);
+        baro_txt_draw_text(&baro_surface, x, y, line, BARO_TXT_COLOR_GREEN,
+                      BARO_TXT_COLOR_BLACK, BARO_HUD_SCALE);
 
-        hud_format_fixed(num, sizeof(num), data->rel_altitude_m, 1U, 1);
+        baro_txt_format_fixed(num, sizeof(num), data->rel_altitude_m, 1U, 1);
         snprintf(line, sizeof(line), "REL %9s m", num);
-        hud_draw_text(&hud_surface, x, y + dy, line, HUD_COLOR_CYAN,
-                      HUD_COLOR_BLACK, BARO_HUD_SCALE);
+        baro_txt_draw_text(&baro_surface, x, y + dy, line, BARO_TXT_COLOR_CYAN,
+                      BARO_TXT_COLOR_BLACK, BARO_HUD_SCALE);
 
-        hud_format_fixed(num, sizeof(num), data->pressure_hpa, 2U, 0);
+        baro_txt_format_fixed(num, sizeof(num), data->pressure_hpa, 2U, 0);
         snprintf(line, sizeof(line), "P %9s hPa", num);
-        hud_draw_text(&hud_surface, x, y + (2U * dy), line, HUD_COLOR_WHITE,
-                      HUD_COLOR_BLACK, BARO_HUD_SCALE);
+        baro_txt_draw_text(&baro_surface, x, y + (2U * dy), line, BARO_TXT_COLOR_WHITE,
+                      BARO_TXT_COLOR_BLACK, BARO_HUD_SCALE);
 
-        hud_format_fixed(num, sizeof(num), data->temperature_c, 1U, 0);
+        baro_txt_format_fixed(num, sizeof(num), data->temperature_c, 1U, 0);
         snprintf(line, sizeof(line), "T %9s *C", num);
-        hud_draw_text(&hud_surface, x, y + (3U * dy), line, HUD_COLOR_WHITE,
-                      HUD_COLOR_BLACK, BARO_HUD_SCALE);
+        baro_txt_draw_text(&baro_surface, x, y + (3U * dy), line, BARO_TXT_COLOR_WHITE,
+                      BARO_TXT_COLOR_BLACK, BARO_HUD_SCALE);
     }
 
-    hud_flush(&hud_surface, BARO_HUD_X, BARO_HUD_Y, BARO_HUD_W, BARO_HUD_H);
+    baro_txt_flush(&baro_surface, BARO_HUD_X, BARO_HUD_Y, BARO_HUD_W, BARO_HUD_H);
 }
 
 
@@ -402,10 +403,10 @@ static void baro_print(const baro_data_t* data)
 {
     char alt[16], rel[16], prs[16], tmp[16];
 
-    hud_format_fixed(alt, sizeof(alt), data->altitude_m, 1U, 0);
-    hud_format_fixed(rel, sizeof(rel), data->rel_altitude_m, 1U, 1);
-    hud_format_fixed(prs, sizeof(prs), data->pressure_hpa, 2U, 0);
-    hud_format_fixed(tmp, sizeof(tmp), data->temperature_c, 1U, 0);
+    baro_txt_format_fixed(alt, sizeof(alt), data->altitude_m, 1U, 0);
+    baro_txt_format_fixed(rel, sizeof(rel), data->rel_altitude_m, 1U, 1);
+    baro_txt_format_fixed(prs, sizeof(prs), data->pressure_hpa, 2U, 0);
+    baro_txt_format_fixed(tmp, sizeof(tmp), data->temperature_c, 1U, 0);
 
     printf("DPS368: P = %s hPa, T = %s C, ALT = %s m, REL = %s m\r\n",
            prs, tmp, alt, rel);
@@ -500,9 +501,11 @@ static void cm55_ns_gfx_task(void *arg)
     /* Enable the I2C */
     Cy_SCB_I2C_Enable(CYBSP_I2C_CONTROLLER_HW);
 
-    /* Initialize the display */
+    /* Initialize the display (holds the shared I2C bus while doing so) */
+    (void)i2c_bus_lock(I2C_BUS_WAIT_FOREVER);
     panel_status = mtb_disp_waveshare_4p3_init(CYBSP_I2C_CONTROLLER_HW,
                                                 &disp_i2c_controller_context);
+    i2c_bus_unlock();
 
     if (CY_RSLT_SUCCESS != panel_status)
     {
@@ -656,6 +659,9 @@ int main(void)
 
     /* Enable global interrupts */
     __enable_irq();
+
+    /* Mutex for the I2C bus shared by display and sensors */
+    i2c_bus_init();
 
     /* Create the FreeRTOS Task */
     task_return = xTaskCreate(cm55_ns_gfx_task, GFX_TASK_NAME,

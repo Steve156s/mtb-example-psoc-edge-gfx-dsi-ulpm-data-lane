@@ -14,6 +14,7 @@
 #include "mtb_xensiv_dps3xx.h"
 
 #include "barometer.h"
+#include "i2c_bus.h"
 
 /*******************************************************************************
 * Macros
@@ -28,6 +29,10 @@
 
 /* Returned by baro_update() when baro_init() has not succeeded */
 #define BARO_RSLT_NOT_READY         (CY_RSLT_CREATE(CY_RSLT_TYPE_ERROR, 0U, 1U))
+#define BARO_RSLT_BUS_BUSY          (CY_RSLT_CREATE(CY_RSLT_TYPE_ERROR, 0U, 2U))
+
+/* Max wait for the shared I2C bus (display / IMU / compass use it too) */
+#define BARO_BUS_LOCK_TIMEOUT_MS    (50U)
 
 /*******************************************************************************
 * Global Variables
@@ -95,16 +100,19 @@ cy_rslt_t baro_init(CySCB_Type* i2c_base, cy_stc_scb_i2c_context_t* i2c_context)
         return result;
     }
 
+    if (!i2c_bus_lock(I2C_BUS_WAIT_FOREVER))
+    {
+        return BARO_RSLT_BUS_BUSY;
+    }
+
     /* KIT_PSE84 boards strap the DPS368 SDO pin high -> address 0x77 */
     result = mtb_xensiv_dps3xx_init_i2c(&baro_sensor, &baro_i2c_hal_obj,
                                         XENSIV_DPS3XX_I2C_ADDR_DEFAULT);
-    if (CY_RSLT_SUCCESS != result)
-    {
-        return result;
-    }
-
     /* Stop measurements before changing the oversampling / rate */
-    result = xensiv_dps3xx_get_config(&baro_sensor, &config);
+    if (CY_RSLT_SUCCESS == result)
+    {
+        result = xensiv_dps3xx_get_config(&baro_sensor, &config);
+    }
     if (CY_RSLT_SUCCESS == result)
     {
         config.dev_mode = XENSIV_DPS3XX_MODE_IDLE;
@@ -125,6 +133,8 @@ cy_rslt_t baro_init(CySCB_Type* i2c_base, cy_stc_scb_i2c_context_t* i2c_context)
         config.dev_mode               = XENSIV_DPS3XX_MODE_BACKGROUND_ALL;
         result = xensiv_dps3xx_set_config(&baro_sensor, &config);
     }
+
+    i2c_bus_unlock();
 
     if (CY_RSLT_SUCCESS == result)
     {
@@ -156,7 +166,12 @@ cy_rslt_t baro_update(baro_data_t* data)
         return BARO_RSLT_NOT_READY;
     }
 
+    if (!i2c_bus_lock(BARO_BUS_LOCK_TIMEOUT_MS))
+    {
+        return BARO_RSLT_BUS_BUSY;
+    }
     result = xensiv_dps3xx_read(&baro_sensor, &pressure_hpa, &temperature_c);
+    i2c_bus_unlock();
     if (CY_RSLT_SUCCESS != result)
     {
         return result;
