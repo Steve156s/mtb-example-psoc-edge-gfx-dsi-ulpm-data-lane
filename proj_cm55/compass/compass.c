@@ -4,13 +4,14 @@
 * Description      : BMM350 tilt compensated e-compass service. Uses the
 *                    Bosch Sensortec BMM350 SensorAPI (BSD-3-Clause) found
 *                    under compass/bosch/bmm350/. Gravity for tilt
-*                    compensation comes from the BMI270 IMU service
-*                    (imu/imu_bmi270.h), so the BMI270 is driven by one
-*                    module only.
+*                    compensation comes from compass_port_get_gravity(), a
+*                    weak hook that returns "not available" by default, so
+*                    this module builds on its own. When the BMI270 module
+*                    is merged, override the hook (see compass.h).
 *
 *                    Flow (every COMPASS_SAMPLE_PERIOD_MS):
 *                      BMM350 compensated XYZ (uT) -> axis map -> calibration
-*                      imu_get_state().accel_g     (already in body frame)
+*                      compass_port_get_gravity()  (accelerometer, body frame)
 *                      -> tilt compensated heading -> low-pass -> declination
 *
 *******************************************************************************/
@@ -23,9 +24,6 @@
 #include "mag_i2c.h"
 
 #include "bmm350.h"
-#if (COMPASS_USE_BMI270_TILT_COMP)
-#include "imu_bmi270.h"
-#endif
 
 /*******************************************************************************
 * Macros
@@ -33,8 +31,6 @@
 #define COMPASS_TASK_NAME               ("Compass Task")
 #define COMPASS_TASK_STACK_SIZE         (configMINIMAL_STACK_SIZE * 6)
 
-/* Accelerometer sample older than this is not used for tilt compensation */
-#define COMPASS_ACC_MAX_AGE_MS          (200U)
 
 /*******************************************************************************
 * Static data
@@ -155,30 +151,31 @@ static int8_t bmm350_setup(void)
 
 
 /*******************************************************************************
-* Function Name: get_gravity
+* Function Name: compass_port_get_gravity (weak default)
 ********************************************************************************
 * Summary:
-*  Fetches the latest "up" vector (accelerometer, g, body frame) from the
-*  BMI270 IMU service. Returns false if no fresh sample is available.
+*  Default: no accelerometer, the board is assumed level. Override in another
+*  file to enable tilt compensation.
 *******************************************************************************/
+__WEAK bool compass_port_get_gravity(float up[3])
+{
+    (void) up;
+    return false;
+}
+
 static bool get_gravity(compass_vec3_t *up)
 {
-#if (COMPASS_USE_BMI270_TILT_COMP)
-    imu_state_t imu;
-    uint32_t now = (uint32_t) (xTaskGetTickCount() * portTICK_PERIOD_MS);
+    float v[3];
 
-    if (imu_get_state(&imu) && imu.valid &&
-        ((now - imu.timestamp_ms) <= COMPASS_ACC_MAX_AGE_MS))
+    if (!compass_port_get_gravity(v))
     {
-        up->x = imu.accel_g[0];
-        up->y = imu.accel_g[1];
-        up->z = imu.accel_g[2];
-        return true;
+        return false;
     }
-#else
-    (void) up;
-#endif
-    return false;
+
+    up->x = v[0];
+    up->y = v[1];
+    up->z = v[2];
+    return true;
 }
 
 
@@ -259,7 +256,7 @@ static void compass_task(void *arg)
 
         mag_body = apply_axis_map(mag_axis_map, mag_data.x, mag_data.y, mag_data.z);
 
-        /* Without a fresh BMI270 sample the board is assumed level */
+        /* Without an accelerometer sample the board is assumed level */
         acc_ok = get_gravity(&acc_body);
         st.tilt_compensated = acc_ok;
 

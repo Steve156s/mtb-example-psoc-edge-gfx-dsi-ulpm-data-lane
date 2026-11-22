@@ -3,8 +3,10 @@
 *
 * Description      : Thin, thread-safe register access layer on top of the
 *                    PDL SCB I2C controller, used by the Bosch BMM350
-*                    SensorAPI glue. Every transfer holds the shared bus
-*                    mutex from i2c_bus.h.
+*                    SensorAPI glue. Transfers are serialised with a private
+*                    mutex. If other tasks later use the same bus through
+*                    their own drivers, replace mag_i2c_bus_lock/unlock with
+*                    the project-wide bus mutex.
 *
 *                    The I2C block, its interrupt and its context are owned by
 *                    main.c (the same bus carries the display touch controller
@@ -44,8 +46,8 @@ typedef struct
 /* Bus mutex wait per register access */
 #define MAG_I2C_LOCK_TIMEOUT_MS      (100U)
 
-/* Must be called after Cy_SCB_I2C_Init()/Enable(), the I2C IRQ and
- * i2c_bus_init() have been done by the application. */
+/* Must be called after Cy_SCB_I2C_Init()/Enable() and the I2C IRQ have been
+ * configured by the application, before the compass task runs. */
 cy_rslt_t mag_i2c_init(CySCB_Type *base, cy_stc_scb_i2c_context_t *context);
 
 /* Register read/write: 0 on success, negative on error (Bosch convention). */

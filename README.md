@@ -97,24 +97,6 @@ See [Using the code example](docs/using_the_code_example.md) for instructions on
    ![](images/dsi-ulpm-exit-terminal-output.png)
 
 
-## BMI270 IMU extension (HUD goggle prototype)
-
-> **Status:** not yet verified on hardware.
-
-The CM55 project additionally runs a BMI270 6-axis IMU service (`proj_cm55/imu/`):
-
-- Reads accelerometer (±16 g) and gyroscope (±2000 dps) at 50 Hz over `CYBSP_I2C_CONTROLLER` (the same I2C controller the display uses), via Infineon [sensor-motion-bmi270](https://github.com/Infineon/sensor-motion-bmi270) / Bosch BMI270_SensorAPI. Address 0x68 is tried first, then 0x69.
-- Calibrates gyro bias during the first second after boot (keep the kit still).
-- Computes pitch / roll with a complementary filter (accelerometer is ignored while |a| is outside 0.8–1.2 g).
-- Detects **free fall** (|a| < 0.35 g for 80 ms), **impact** (|a| ≥ 3.5 g) and **fall** (impact, then still for 1.5 s with ≥ 45° attitude change versus before the impact). Thresholds are first guesses in `imu_motion_default_cfg()` and must be tuned with recorded data.
-- Draws pitch, roll, |a| and the latest event in the top-left corner of the screen (10 Hz) and logs to the UART (2 Hz).
-
-Other modules can read the result with `imu_get_attitude(&pitch, &roll)` (e.g. tilt-compensated heading), `imu_get_state()` and `imu_take_events()`. Use `IMU_AXIS_REMAP` to map the sensor axes to the goggle frame.
-
-All transfers on `CYBSP_I2C_CONTROLLER` (display init, IMU) are serialised with the recursive mutex in `proj_cm55/i2c_bus.h` (`i2c_bus_lock()` / `i2c_bus_unlock()`); other sensors on that bus must use it too.
-
-The motion logic has no MCU dependencies and has a host test: `cd tools/imu_host_test && make`.
-
 ## BMM350 e-compass extension (HUD goggle prototype)
 
 > **Status:** not yet verified on hardware. Axis mapping, I2C address and the on-screen heading direction must be checked during board bring-up (see checklist below).
@@ -122,9 +104,9 @@ The motion logic has no MCU dependencies and has a host test: `cd tools/imu_host
 The CM55 project additionally runs a BMM350 3-axis magnetometer service (`proj_cm55/compass/`) and shows the heading as a HUD tape in the bottom band of the screen:
 
 - Driver: Bosch Sensortec [BMM350_SensorAPI](https://github.com/boschsensortec/BMM350_SensorAPI) (BSD-3-Clause, copied unmodified into `proj_cm55/compass/bosch/bmm350/`). OTP compensation, magnetic reset and temperature compensation are done by the Bosch API; output is in µT.
-- Bus: `CYBSP_I2C_CONTROLLER` (SCB0, P8.0/P8.1 — on KIT_PSE84_AI this is the 1.8 V sensor bus). Address 0x14 is tried first, then 0x15. Every transfer holds the shared `i2c_bus` mutex.
+- Bus: `CYBSP_I2C_CONTROLLER` (SCB0, P8.0/P8.1 — on KIT_PSE84_AI this is the 1.8 V sensor bus). Address 0x14 is tried first, then 0x15. Transfers are serialised with a mutex in `mag_i2c.c`.
 - 25 Hz, 4× averaging, normal mode.
-- **Tilt compensation:** gravity is taken from the BMI270 IMU service (`imu_get_state()`), so the BMI270 is driven by one module only. If no fresh IMU sample is available the board is assumed level and the HUD shows `LEVEL`.
+- **Tilt compensation:** the math is implemented (`compass_tilt_compensated_heading()`, host-tested ±40° pitch/roll). Gravity comes from the weak hook `compass_port_get_gravity()`, which by default returns "not available": this module builds on its own, the board is assumed level and the HUD shows `LEVEL`. When the BMI270 module is merged, override the hook (example in `compass.h`).
 - **Calibration:** press **USER BTN2** and rotate the kit in a figure-8 for 20 s (press again to finish early). Hard-iron offset and diagonal soft-iron scale are computed from the min/max of each axis; the result is rejected if any axis moved less than 30 µT. The calibration is kept in RAM only (lost at reset). The HUD shows `CAL?` until a calibration is applied.
 - Heading is low-pass filtered on the unit circle (no 359°→0° jump), magnetic declination can be added with `COMPASS_DECLINATION_DEG`, and `MAG?` is shown when |B| is outside 20–80 µT (nearby steel / magnets).
 - All settings are in `proj_cm55/compass/compass_config.h` and can be overridden with `DEFINES+=` in the Makefile.
@@ -137,7 +119,7 @@ Bring-up checklist:
 
 1. UART shows `[compass] BMM350 found at 0x14` (or 0x15). If `NO MAG` is shown, check the address and the bus voltage.
 2. Lay the kit flat and turn it clockwise (seen from above): the heading must increase. If it decreases, fix `COMPASS_MAG_AXIS_MAP`.
-3. With the kit pointing at a fixed object, tilt it ±30°: the heading must stay within a few degrees. If not, the BMM350 axes do not match the IMU body frame (`IMU_AXIS_REMAP`) — fix `COMPASS_MAG_AXIS_MAP`.
+3. With the kit pointing at a fixed object, tilt it ±30°: the heading must stay within a few degrees. If not, (only with the gravity hook enabled) the BMM350 axes do not match the accelerometer frame — fix `COMPASS_MAG_AXIS_MAP`.
 4. Calibrate (USER BTN2) and compare with a phone compass in all four directions.
 5. For the goggle, set `COMPASS_FORWARD_AXIS` to the board axis that points where the wearer looks.
 

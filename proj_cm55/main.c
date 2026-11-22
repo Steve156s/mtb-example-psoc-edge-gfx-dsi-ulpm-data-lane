@@ -54,9 +54,6 @@
 
 #include "infineon_logo.h"
 
-#include "imu_bmi270.h"
-#include "i2c_bus.h"
-
 #include "compass.h"
 #include "compass_hud.h"
 
@@ -75,20 +72,6 @@
 
 #define DSI_ULPM_TIME_INTERVAL_MS           (6000U)
 
-/* Idle wait of the GFX task between button checks. Without it the
- * highest-priority task spins and starves the IMU task. */
-#define GFX_TASK_POLL_DELAY_MS              (20U)
-
-/* Visible width of the Waveshare 4.3" panel; the buffer stride is IMAGE_WIDTH */
-#define DISPLAY_VISIBLE_WIDTH               (800U)
-
-/* BMM350 e-compass: sensor task priority (below the graphics task), HUD
- * refresh period and position. The compass tape uses the bottom band of the
- * screen; the top is used by the IMU (left) and barometer (right) panels. */
-#define COMPASS_TASK_PRIORITY               (configMAX_PRIORITIES - 2)
-#define COMPASS_HUD_REFRESH_MS              (60U)
-#define COMPASS_HUD_FIRST_ROW               (IMAGE_HEIGHT - COMPASS_HUD_BAND_HEIGHT)
-
 #define SET_VAL                             (1U)
 
 #define GPIO_HIGH                           (1U)
@@ -102,6 +85,19 @@
  * frequency set by the BSP.
  */
 #define LPTIMER_1_WAIT_TIME_USEC            (62U)
+
+/* Idle wait of the GFX task between button checks. Without it the
+ * highest-priority task spins and starves the compass task. */
+#define GFX_TASK_POLL_DELAY_MS              (20U)
+
+/* Visible width of the Waveshare 4.3" panel; the buffer stride is IMAGE_WIDTH */
+#define DISPLAY_VISIBLE_WIDTH               (800U)
+
+/* BMM350 e-compass: sensor task priority (below the graphics task), HUD
+ * refresh period and position (bottom band of the screen). */
+#define COMPASS_TASK_PRIORITY               (configMAX_PRIORITIES - 2)
+#define COMPASS_HUD_REFRESH_MS              (60U)
+#define COMPASS_HUD_FIRST_ROW               (IMAGE_HEIGHT - COMPASS_HUD_BAND_HEIGHT)
 
 /* Define the LPTimer interrupt priority number. '1' implies highest priority.
  */
@@ -379,6 +375,8 @@ static void compass_hud_update(void)
 *       - Initializes "Waveshare 4.3-inch DSI LCD panel".
 *       - Display the Infineon logo and based on USER BTN1 press, exercises
 *         MIPI DSI ULPM.
+*       - Starts the BMM350 e-compass task (same I2C controller as the
+*         display) and draws a HUD heading tape in the bottom band.
 *
 * Parameters:
 *  void *arg (unused)
@@ -396,6 +394,7 @@ static void cm55_ns_gfx_task(void *arg)
     cy_rslt_t panel_status = CY_RSLT_SUCCESS;
     volatile cy_en_gfx_status_t status;
     volatile cy_en_mipidsi_status_t mipi_status;
+    TickType_t last_hud;
     cy_en_sysint_status_t sysint_status = CY_SYSINT_SUCCESS;
 
     /* Initial delay to allow debounce delays to settle */
@@ -454,11 +453,9 @@ static void cm55_ns_gfx_task(void *arg)
     /* Enable the I2C */
     Cy_SCB_I2C_Enable(CYBSP_I2C_CONTROLLER_HW);
 
-    /* Initialize the display (holds the shared I2C bus while doing so) */
-    (void)i2c_bus_lock(I2C_BUS_WAIT_FOREVER);
+    /* Initialize the display */
     panel_status = mtb_disp_waveshare_4p3_init(CYBSP_I2C_CONTROLLER_HW,
                                                 &disp_i2c_controller_context);
-    i2c_bus_unlock();
 
     if (CY_RSLT_SUCCESS != panel_status)
     {
@@ -467,6 +464,17 @@ static void cm55_ns_gfx_task(void *arg)
     }
 
     memcpy(graphics_buffer, img_ptr, sizeof(img_ptr));
+
+    /* Start the BMM350 e-compass. It reuses the I2C controller (and its
+     * interrupt) that was just used to bring up the display. */
+    if (CY_RSLT_SUCCESS != compass_start(CYBSP_I2C_CONTROLLER_HW,
+                                         &disp_i2c_controller_context,
+                                         COMPASS_TASK_PRIORITY))
+    {
+        printf("Compass task creation failed\r\n");
+    }
+
+    compass_hud_update();
 
     /* Set the frame buffer with the image pointer to be displayed on LCD */
     status = Cy_GFXSS_Set_FrameBuffer(base, (uint32_t*)graphics_buffer, &gfx_context);
@@ -478,35 +486,6 @@ static void cm55_ns_gfx_task(void *arg)
         handle_app_error();
     }
 
-    /* Start the BMI270 IMU service. It shares the display I2C controller
-     * (already initialised above) and draws pitch / roll / impact on the
-     * top-left corner of the frame buffer. */
-    {
-        const hud_surface_t hud =
-        {
-            .pixels = (uint16_t *)graphics_buffer,
-            .stride = IMAGE_WIDTH,
-            .width  = DISPLAY_VISIBLE_WIDTH,
-            .height = IMAGE_HEIGHT,
-        };
-
-        if (CY_RSLT_SUCCESS != imu_bmi270_start(&disp_i2c_controller_context, &hud))
-        {
-            printf("IMU task creation failed\r\n");
-        }
-    }
-
-    /* Start the BMM350 e-compass (same I2C controller, serialised through
-     * i2c_bus). Tilt compensation uses the gravity vector of the IMU task. */
-    if (CY_RSLT_SUCCESS != compass_start(CYBSP_I2C_CONTROLLER_HW,
-                                         &disp_i2c_controller_context,
-                                         COMPASS_TASK_PRIORITY))
-    {
-        printf("Compass task creation failed\r\n");
-    }
-
-    compass_hud_update();
-
     /* Enable USER BTN1 interrupt */
     NVIC_EnableIRQ(user_btn1_irq_cfg.intrSrc);
 
@@ -515,7 +494,7 @@ static void cm55_ns_gfx_task(void *arg)
     printf("Press USER BTN1 button to enter ULPM\r\n");
     printf("Press USER BTN2 button to calibrate the compass (rotate in a figure-8)\r\n\n");
 
-    TickType_t last_hud = xTaskGetTickCount();
+    last_hud = xTaskGetTickCount();
 
     for (;;)
     {
@@ -567,7 +546,7 @@ static void cm55_ns_gfx_task(void *arg)
             user_button_flag = false;
         }
 
-        /* Yield so lower-priority tasks (IMU, compass) can run */
+        /* Yield so lower-priority tasks (compass, idle) can run */
         vTaskDelay(pdMS_TO_TICKS(GFX_TASK_POLL_DELAY_MS));
     }
 }
@@ -617,9 +596,6 @@ int main(void)
 
     /* Enable global interrupts */
     __enable_irq();
-
-    /* Mutex for the I2C bus shared by display and sensors */
-    i2c_bus_init();
 
     /* Create the FreeRTOS Task */
     task_return = xTaskCreate(cm55_ns_gfx_task, GFX_TASK_NAME,

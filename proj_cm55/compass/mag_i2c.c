@@ -2,8 +2,7 @@
 * File Name        : mag_i2c.c
 *
 * Description      : Thread-safe register access over the PDL SCB I2C
-*                    controller (high-level, interrupt driven transfers),
-*                    serialised with the other bus users through i2c_bus.h.
+*                    controller (high-level, interrupt driven transfers).
 *
 *******************************************************************************/
 #include <string.h>
@@ -12,14 +11,15 @@
 
 #include "FreeRTOS.h"
 #include "task.h"
-
-#include "i2c_bus.h"
+#include "semphr.h"
 
 /*******************************************************************************
 * Static data
 *******************************************************************************/
 static CySCB_Type *i2c_base = NULL;
 static cy_stc_scb_i2c_context_t *i2c_ctx = NULL;
+static SemaphoreHandle_t i2c_mutex = NULL;
+static StaticSemaphore_t i2c_mutex_storage;
 
 static uint8_t tx_buf[MAG_I2C_MAX_WRITE_LEN + 1U];
 
@@ -35,7 +35,7 @@ static uint8_t tx_buf[MAG_I2C_MAX_WRITE_LEN + 1U];
 *
 * Return:
 *  0 on success, -1 on bus error / NAK, -2 on timeout. (-3 from the callers
-*  means the shared bus mutex could not be taken.)
+*  means the bus mutex could not be taken.)
 *******************************************************************************/
 static int8_t wait_xfer_done(bool is_read)
 {
@@ -81,7 +81,25 @@ cy_rslt_t mag_i2c_init(CySCB_Type *base, cy_stc_scb_i2c_context_t *context)
     i2c_base = base;
     i2c_ctx = context;
 
-    return CY_RSLT_SUCCESS;
+    if (NULL == i2c_mutex)
+    {
+        i2c_mutex = xSemaphoreCreateMutexStatic(&i2c_mutex_storage);
+    }
+
+    return (NULL != i2c_mutex) ? CY_RSLT_SUCCESS : MAG_I2C_RSLT_ERR;
+}
+
+
+/* Bus lock. One place to swap in a project-wide I2C mutex when the sensor
+ * modules are merged. */
+static bool mag_i2c_bus_lock(void)
+{
+    return (pdTRUE == xSemaphoreTake(i2c_mutex, pdMS_TO_TICKS(MAG_I2C_LOCK_TIMEOUT_MS)));
+}
+
+static void mag_i2c_bus_unlock(void)
+{
+    (void) xSemaphoreGive(i2c_mutex);
 }
 
 
@@ -95,7 +113,7 @@ int8_t mag_i2c_read_regs(uint8_t address, uint8_t reg, uint8_t *data, uint32_t l
         return -1;
     }
 
-    if (!i2c_bus_lock(MAG_I2C_LOCK_TIMEOUT_MS))
+    if (!mag_i2c_bus_lock())
     {
         return -3;
     }
@@ -117,7 +135,7 @@ int8_t mag_i2c_read_regs(uint8_t address, uint8_t reg, uint8_t *data, uint32_t l
         rslt = (CY_SCB_I2C_SUCCESS == Cy_SCB_I2C_MasterRead(i2c_base, &xfer, i2c_ctx)) ? wait_xfer_done(true) : -1;
     }
 
-    i2c_bus_unlock();
+    mag_i2c_bus_unlock();
 
     return rslt;
 }
@@ -133,7 +151,7 @@ int8_t mag_i2c_write_regs(uint8_t address, uint8_t reg, const uint8_t *data, uin
         return -1;
     }
 
-    if (!i2c_bus_lock(MAG_I2C_LOCK_TIMEOUT_MS))
+    if (!mag_i2c_bus_lock())
     {
         return -3;
     }
@@ -151,7 +169,7 @@ int8_t mag_i2c_write_regs(uint8_t address, uint8_t reg, const uint8_t *data, uin
 
     rslt = (CY_SCB_I2C_SUCCESS == Cy_SCB_I2C_MasterWrite(i2c_base, &xfer, i2c_ctx)) ? wait_xfer_done(false) : -1;
 
-    i2c_bus_unlock();
+    mag_i2c_bus_unlock();
 
     return rslt;
 }

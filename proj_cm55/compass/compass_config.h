@@ -23,19 +23,14 @@
 #define COMPASS_BMM350_I2C_ADDR_SECONDARY   (0x15U)
 #endif
 
-/* 1: take gravity from the BMI270 IMU service (imu/imu_bmi270.h) for tilt
- * compensation. 0: heading is valid only when the board is held level. */
-#ifndef COMPASS_USE_BMI270_TILT_COMP
-#define COMPASS_USE_BMI270_TILT_COMP        (1)
-#endif
-
 /* ---------------- Sensor -> body frame mapping ---------------------------- */
 /* Row i gives body axis i as a combination of BMM350 sensor axes (x, y, z).
  * Entries must be -1, 0 or +1 and the result must be a right-handed frame.
- * The body frame MUST be the same one the IMU service outputs after its
- * IMU_AXIS_REMAP (right-handed, +Z up when level, accel = (0, 0, +1 g)).
- * BMM350 and BMI270 are separate packages and their axes are not
- * necessarily parallel on the PCB: check both datasheets / the layout.
+ * Body frame: right-handed, +Z up when the board lies flat. If tilt
+ * compensation is enabled (compass_port_get_gravity), the accelerometer
+ * must be mapped to the same frame. BMM350 and BMI270 are separate packages
+ * and their axes are not necessarily parallel on the PCB: check both
+ * datasheets / the layout.
  * Bring-up check: rotate clockwise seen from above -> heading must increase;
  * tilt the board 30 deg while pointing at a fixed object -> heading must
  * stay within a few degrees.

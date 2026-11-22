@@ -52,6 +52,25 @@ void compass_request_calibration(void);
 /* Thread-safe snapshot of the latest result. */
 void compass_get_state(compass_state_t *out);
 
+/*
+ * Tilt compensation hook (weak, default returns false = "assume level").
+ * Override it once an accelerometer driver is available, e.g. with the
+ * BMI270 module:
+ *
+ *   bool compass_port_get_gravity(float up[3])
+ *   {
+ *       imu_state_t imu;
+ *       if (!imu_get_state(&imu) || !imu.valid) { return false; }
+ *       up[0] = imu.accel_g[0]; up[1] = imu.accel_g[1]; up[2] = imu.accel_g[2];
+ *       return true;
+ *   }
+ *
+ * up[] is the accelerometer reading (any unit) in the same right-handed body
+ * frame as COMPASS_MAG_AXIS_MAP; at rest and level it is (0, 0, +g).
+ * Called from the compass task at COMPASS_SAMPLE_PERIOD_MS; must not block.
+ */
+bool compass_port_get_gravity(float up[3]);
+
 #if defined(__cplusplus)
 }
 #endif
