@@ -97,6 +97,31 @@ See [Using the code example](docs/using_the_code_example.md) for instructions on
    ![](images/dsi-ulpm-exit-terminal-output.png)
 
 
+## SHT40 temperature / humidity overlay (HUD goggle prototype)
+
+The CM55 application also reads the on-board Sensirion SHT40 temperature and humidity sensor (I2C address 0x44 on `CYBSP_I2C_CONTROLLER`, shared with the display; on KIT_PSE84_AI the 1.8 V I2C on P8.0 SCL / P8.1 SDA) with the official [embedded-i2c-sht4x](https://github.com/Sensirion/embedded-i2c-sht4x) driver and overlays the result on the left side of the LCD (x 16, y 196, 304 x 151 px):
+
+![](images/sht40-hud-preview.png)
+
+Line | Content
+---- | -------
+`T`    | Air temperature in &deg;C (high repeatability, 1 Hz, EMA filtered)
+`RH`   | Relative humidity in %RH (clamped to 0..100)
+`DEW`  | Dew point in &deg;C (Magnus 17.62 / 243.12 &deg;C)
+`LENS` | Lens fog warning: `CLEAR`, `FOG RISK` (lens within 2 &deg;C of the condensation point) or `FOG!` (at or below it). Below 0 &deg;C the frost point is used
+`BATT` | Battery warming heater request: `HEAT ON` at or below 0 &deg;C, `HEAT OFF` at or above 5 &deg;C (hysteresis)
+
+- A separate FreeRTOS task (*SHT40 Task*, priority below the graphics task) measures once per second; the graphics task redraws the panel and prints one UART line per second, for example
+  `SHT40: T = 21.43 C, RH = 45.12 %, Td = 9.03 C, Tf = 9.03 C, AH = 8.55 g/m3, lens margin = +9.4 C, fog = OK, batt heater = OFF`
+- The graphics task now waits 20 ms per loop (`GFX_TASK_POLL_DELAY_MS`) so that it does not starve the lower priority sensor task; the overlay is not redrawn while the DSI data lane is in ULPM
+- Without a lens temperature sensor the lens is estimated as air temperature - `SHT40_LENS_DELTA_C` (3 &deg;C). The product code overrides the weak hooks `sht40_port_get_lens_temp_c()`, `sht40_port_get_battery_temp_c()`, `sht40_port_battery_heater()` and `sht40_port_fog_level_changed()` (see *proj_cm55/humidity/sht40_env.h*)
+- After 60 s at 95 %RH or more the SHT40 on-chip heater is pulsed (110 mW, 0.1 s, at most once per minute) to recover from condensation; the next 10 s of readings are discarded. Disable with `DEFINES+=SHT40_AUTO_HEATER=0`
+- All thresholds are in *proj_cm55/humidity/sht40_config.h* and can be overridden from *proj_cm55/Makefile* with `DEFINES+=...`
+- If the sensor does not answer, the overlay shows `NO SENSOR` and the DSI ULPM demo continues
+- Sources: *proj_cm55/humidity/* (`sensirion/` = unmodified Sensirion driver 1.1.0, `sht40_i2c_hal_psoc.c` = Sensirion HAL on the PDL SCB I2C, `sht40_env.c` = task and logic, `sht40_math.c` = dew point / fog / heater math, `sht40_hud.c` = panel renderer)
+- Host unit test of the math and the panel renderer (no ModusToolbox needed): `make -C tools/sht40_host_test run`
+
+
 ## Related resources
 
 Resources  | Links
