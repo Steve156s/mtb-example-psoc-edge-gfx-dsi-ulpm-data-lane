@@ -1,0 +1,43 @@
+# id,text  (Traditional Chinese voice prompts; regenerate with tts_generate.py)
+# --- phrases ---
+BOOT,雪鏡已啟動
+LOW_BATTERY,電量低，請充電
+TRACKER_CONNECTED,已連線追蹤器
+LINK_LOST,連線中斷
+NEW_MESSAGE,收到新訊息
+SOS_SENT,求救訊號已發送
+BATTERY_HEATING,低溫，電池加熱中
+FOG_WARNING,鏡片可能起霧
+COMPASS_CAL_DONE,電子羅盤校正完成
+# --- words for spoken numbers ---
+W_SPEED,時速
+W_KM,公里
+W_ALTITUDE,海拔
+W_METER,公尺
+W_BATTERY,電量
+W_PERCENT,百分之
+W_HEADING,方位
+# --- digits / units (keep this order: D_0..D_9 must be consecutive) ---
+D_0,零
+D_1,一
+D_2,二
+D_3,三
+D_4,四
+D_5,五
+D_6,六
+D_7,七
+D_8,八
+D_9,九
+D_10,十
+D_100,百
+D_1000,千
+D_LIANG,兩
+# --- compass directions (keep this order: N, NE, E, SE, S, SW, W, NW) ---
+DIR_N,北
+DIR_NE,東北
+DIR_E,東
+DIR_SE,東南
+DIR_S,南
+DIR_SW,西南
+DIR_W,西
+DIR_NW,西北

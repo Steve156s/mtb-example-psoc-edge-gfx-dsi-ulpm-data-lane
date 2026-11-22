@@ -54,6 +54,9 @@
 
 #include "infineon_logo.h"
 
+#include "audio_player.h"
+#include "audio_demo.h"
+
 
 /*******************************************************************************
 * Macros
@@ -68,6 +71,10 @@
 #define BTN_DEBOUNCE_DELAY_MS               (10U)
 
 #define DSI_ULPM_TIME_INTERVAL_MS           (6000U)
+
+/* Idle wait of the GFX task between button checks. Without it the
+ * highest-priority GFX task spins and starves the audio task. */
+#define GFX_TASK_POLL_DELAY_MS              (20U)
 
 #define SET_VAL                             (1U)
 
@@ -96,6 +103,9 @@ GFXSS_Type* base = (GFXSS_Type*) GFXSS;
 cy_stc_gfx_context_t gfx_context;
 
 volatile bool user_button_flag = false;
+
+/* USER BTN2: next audio demo prompt */
+volatile bool user_button2_flag = false;
 
 CY_SECTION(".cy_gpu_buf") uint8_t graphics_buffer[IMAGE_SIZE] = {0xFF};
 
@@ -289,6 +299,7 @@ static void button_isr_handler(void)
     /* Check if USER_BTN2 was pressed */
     if(1UL == Cy_GPIO_GetInterruptStatus(CYBSP_USER_BTN2_PORT, CYBSP_USER_BTN2_PIN))
     {
+        user_button2_flag = true;
         /* Clear the USER_BTN2 interrupt */
         Cy_GPIO_ClearInterrupt(CYBSP_USER_BTN2_PORT, CYBSP_USER_BTN2_PIN);
         NVIC_ClearPendingIRQ(CYBSP_USER_BTN2_IRQ);
@@ -403,18 +414,44 @@ static void cm55_ns_gfx_task(void *arg)
         handle_app_error();
     }
 
+    /* Audio: TLV320DAC3100 on the same I2C controller + I2S (TDM0) */
+    if (CY_RSLT_SUCCESS != audio_player_init(CYBSP_I2C_CONTROLLER_HW, &disp_i2c_controller_context))
+    {
+        printf("Audio player start failed\r\n");
+    }
+    else
+    {
+        (void)audio_play_tone_and_clip(AUDIO_TONE_BOOT, AUDIO_CLIP_BOOT, AUDIO_PRIO_NORMAL);
+    }
+
     /* Enable USER BTN1 interrupt */
     NVIC_EnableIRQ(user_btn1_irq_cfg.intrSrc);
 
     user_button_flag = false;
+    user_button2_flag = false;
 
-    printf("Press USER BTN1 button to enter ULPM\r\n\n");
+    printf("Press USER BTN1 button to enter ULPM\r\n");
+    printf("Press USER BTN2 button to play the next audio prompt\r\n\n");
 
     for (;;)
     {
+        /* USER BTN2: next audio demo prompt */
+        if (user_button2_flag)
+        {
+            while (CYBSP_BTN_PRESSED == Cy_GPIO_Read(CYBSP_USER_BTN2_PORT, CYBSP_USER_BTN2_PIN))
+            {
+                vTaskDelay(pdMS_TO_TICKS(BTN_DEBOUNCE_DELAY_MS));
+            }
+
+            printf("Audio: %s\r\n", audio_demo_next());
+            user_button2_flag = false;
+        }
+
         /* Check for the USER BTN1 interrupt status */
         if (user_button_flag)
         {
+            (void)audio_play_tone(AUDIO_TONE_CLICK, AUDIO_PRIO_NORMAL);
+
             while (CYBSP_BTN_PRESSED == Cy_GPIO_Read(CYBSP_USER_BTN_PORT, CYBSP_USER_BTN_PIN))
             {
                 /* Wait for 10 millisecond */
@@ -450,6 +487,8 @@ static void cm55_ns_gfx_task(void *arg)
             /* Clear USER BTN1 interrupt flag */
             user_button_flag = false;
         }
+
+        vTaskDelay(pdMS_TO_TICKS(GFX_TASK_POLL_DELAY_MS));
     }
 }
 
