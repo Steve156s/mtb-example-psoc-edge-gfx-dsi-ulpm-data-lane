@@ -39,6 +39,9 @@
 /*******************************************************************************
 * Header Files
 *******************************************************************************/
+#include <stdio.h>
+#include <string.h>
+
 #include "cy_graphics.h"
 
 #include "cy_time.h"
@@ -54,13 +57,18 @@
 
 #include "infineon_logo.h"
 
+#include "barometer.h"
+#include "baro_text.h"
+#include "i2c_bus.h"
+
 
 /*******************************************************************************
 * Macros
 *******************************************************************************/
 #define GFX_TASK_NAME                       ("CM55 Gfx Task")
 /* stack size in words */
-#define GFX_TASK_STACK_SIZE                 (configMINIMAL_STACK_SIZE * 3)
+/* Increased from 3x to 6x for snprintf / powf used by the barometer overlay */
+#define GFX_TASK_STACK_SIZE                 (configMINIMAL_STACK_SIZE * 6)
 
 #define GFX_TASK_PRIORITY                   (configMAX_PRIORITIES - 1)
 
@@ -68,6 +76,23 @@
 #define BTN_DEBOUNCE_DELAY_MS               (10U)
 
 #define DSI_ULPM_TIME_INTERVAL_MS           (6000U)
+
+/* DPS368 barometer: sampling period of the main loop and number of samples
+ * between two HUD / UART refreshes (5 x 200 ms = 1 s). */
+#define BARO_SAMPLE_PERIOD_MS               (200U)
+#define BARO_HUD_REFRESH_SAMPLES            (5U)
+
+/* Barometer overlay panel position / size on the 832x480 frame buffer.
+ * Placed top-right (x 384..784, inside the 800 px visible area) so it does
+ * not overlap the IMU panel in the top-left corner. */
+#define BARO_HUD_X                          (384U)
+#define BARO_HUD_Y                          (16U)
+#define BARO_HUD_SCALE                      (4U)
+#define BARO_HUD_LINES                      (4U)
+#define BARO_HUD_COLS                       (16U)
+#define BARO_HUD_PAD                        (8U)
+#define BARO_HUD_W                          ((BARO_HUD_COLS * BARO_TXT_CHAR_ADVANCE(BARO_HUD_SCALE)) + (2U * BARO_HUD_PAD))
+#define BARO_HUD_H                          ((BARO_HUD_LINES * BARO_TXT_LINE_ADVANCE(BARO_HUD_SCALE)) + (2U * BARO_HUD_PAD))
 
 #define SET_VAL                             (1U)
 
@@ -97,7 +122,18 @@ cy_stc_gfx_context_t gfx_context;
 
 volatile bool user_button_flag = false;
 
+/* Set by USER BTN2: zero the relative altitude */
+volatile bool user_button2_flag = false;
+
 CY_SECTION(".cy_gpu_buf") uint8_t graphics_buffer[IMAGE_SIZE] = {0xFF};
+
+/* Frame buffer view used by the barometer overlay */
+static const baro_txt_surface_t baro_surface =
+{
+    .pixels = (uint16_t*)graphics_buffer,
+    .width  = IMAGE_WIDTH,
+    .height = IMAGE_HEIGHT,
+};
 
 /* USER BTN1 interrupt configuration */
 const cy_stc_sysint_t user_btn1_irq_cfg =
@@ -282,17 +318,98 @@ static void button_isr_handler(void)
         NVIC_ClearPendingIRQ(CYBSP_USER_BTN_IRQ);
     }
 
-    /* USER_BTN2 pin is present on the same GPIO port as USER_BTN1 pin */
-    /* This cause the ISR to execute even when USER_BTN2 is pressed accidentally */
-    /* To handle such scenarios we clear the interrupt */
+    /* USER_BTN2 pin is present on the same GPIO port as USER_BTN1 pin and
+     * shares the IRQ line. USER_BTN2 is used to zero the relative altitude
+     * of the DPS368 barometer overlay. */
     
     /* Check if USER_BTN2 was pressed */
     if(1UL == Cy_GPIO_GetInterruptStatus(CYBSP_USER_BTN2_PORT, CYBSP_USER_BTN2_PIN))
     {
+        user_button2_flag = true;
         /* Clear the USER_BTN2 interrupt */
         Cy_GPIO_ClearInterrupt(CYBSP_USER_BTN2_PORT, CYBSP_USER_BTN2_PIN);
         NVIC_ClearPendingIRQ(CYBSP_USER_BTN2_IRQ);
     }
+}
+
+
+/*******************************************************************************
+* Function Name: baro_hud_draw
+********************************************************************************
+* Summary:
+*   Draws the DPS368 barometer panel (altitude, relative altitude, pressure,
+*   temperature) into the frame buffer and flushes it to memory.
+*
+* Parameters:
+*  data : latest barometer data, or NULL when the sensor is not available
+*
+* Return:
+*  void
+*
+*******************************************************************************/
+static void baro_hud_draw(const baro_data_t* data)
+{
+    char num[16];
+    char line[BARO_HUD_COLS + 1U];
+    uint32_t x = BARO_HUD_X + BARO_HUD_PAD;
+    uint32_t y = BARO_HUD_Y + BARO_HUD_PAD;
+    const uint32_t dy = BARO_TXT_LINE_ADVANCE(BARO_HUD_SCALE);
+
+    baro_txt_fill_rect(&baro_surface, BARO_HUD_X, BARO_HUD_Y, BARO_HUD_W, BARO_HUD_H,
+                  BARO_TXT_COLOR_BLACK);
+
+    if (NULL == data)
+    {
+        baro_txt_draw_text(&baro_surface, x, y, "DPS368", BARO_TXT_COLOR_WHITE,
+                      BARO_TXT_COLOR_BLACK, BARO_HUD_SCALE);
+        baro_txt_draw_text(&baro_surface, x, y + dy, "NO SENSOR", BARO_TXT_COLOR_RED,
+                      BARO_TXT_COLOR_BLACK, BARO_HUD_SCALE);
+    }
+    else
+    {
+        baro_txt_format_fixed(num, sizeof(num), data->altitude_m, 1U, 0);
+        snprintf(line, sizeof(line), "ALT %9s m", num);
+        baro_txt_draw_text(&baro_surface, x, y, line, BARO_TXT_COLOR_GREEN,
+                      BARO_TXT_COLOR_BLACK, BARO_HUD_SCALE);
+
+        baro_txt_format_fixed(num, sizeof(num), data->rel_altitude_m, 1U, 1);
+        snprintf(line, sizeof(line), "REL %9s m", num);
+        baro_txt_draw_text(&baro_surface, x, y + dy, line, BARO_TXT_COLOR_CYAN,
+                      BARO_TXT_COLOR_BLACK, BARO_HUD_SCALE);
+
+        baro_txt_format_fixed(num, sizeof(num), data->pressure_hpa, 2U, 0);
+        snprintf(line, sizeof(line), "P %9s hPa", num);
+        baro_txt_draw_text(&baro_surface, x, y + (2U * dy), line, BARO_TXT_COLOR_WHITE,
+                      BARO_TXT_COLOR_BLACK, BARO_HUD_SCALE);
+
+        baro_txt_format_fixed(num, sizeof(num), data->temperature_c, 1U, 0);
+        snprintf(line, sizeof(line), "T %9s *C", num);
+        baro_txt_draw_text(&baro_surface, x, y + (3U * dy), line, BARO_TXT_COLOR_WHITE,
+                      BARO_TXT_COLOR_BLACK, BARO_HUD_SCALE);
+    }
+
+    baro_txt_flush(&baro_surface, BARO_HUD_X, BARO_HUD_Y, BARO_HUD_W, BARO_HUD_H);
+}
+
+
+/*******************************************************************************
+* Function Name: baro_print
+********************************************************************************
+* Summary:
+*   Prints the barometer data on the UART (without printf float support).
+*
+*******************************************************************************/
+static void baro_print(const baro_data_t* data)
+{
+    char alt[16], rel[16], prs[16], tmp[16];
+
+    baro_txt_format_fixed(alt, sizeof(alt), data->altitude_m, 1U, 0);
+    baro_txt_format_fixed(rel, sizeof(rel), data->rel_altitude_m, 1U, 1);
+    baro_txt_format_fixed(prs, sizeof(prs), data->pressure_hpa, 2U, 0);
+    baro_txt_format_fixed(tmp, sizeof(tmp), data->temperature_c, 1U, 0);
+
+    printf("DPS368: P = %s hPa, T = %s C, ALT = %s m, REL = %s m\r\n",
+           prs, tmp, alt, rel);
 }
 
 
@@ -323,6 +440,9 @@ static void cm55_ns_gfx_task(void *arg)
     cy_rslt_t panel_status = CY_RSLT_SUCCESS;
     volatile cy_en_gfx_status_t status;
     volatile cy_en_mipidsi_status_t mipi_status;
+    cy_rslt_t baro_rslt;
+    baro_data_t baro_data;
+    uint32_t baro_sample_count = 0U;
     cy_en_sysint_status_t sysint_status = CY_SYSINT_SUCCESS;
 
     /* Initial delay to allow debounce delays to settle */
@@ -381,9 +501,11 @@ static void cm55_ns_gfx_task(void *arg)
     /* Enable the I2C */
     Cy_SCB_I2C_Enable(CYBSP_I2C_CONTROLLER_HW);
 
-    /* Initialize the display */
+    /* Initialize the display (holds the shared I2C bus while doing so) */
+    (void)i2c_bus_lock(I2C_BUS_WAIT_FOREVER);
     panel_status = mtb_disp_waveshare_4p3_init(CYBSP_I2C_CONTROLLER_HW,
                                                 &disp_i2c_controller_context);
+    i2c_bus_unlock();
 
     if (CY_RSLT_SUCCESS != panel_status)
     {
@@ -392,6 +514,21 @@ static void cm55_ns_gfx_task(void *arg)
     }
 
     memcpy(graphics_buffer, img_ptr, sizeof(img_ptr));
+
+    /* Initialize the DPS368 barometer. It sits on the same I2C controller
+     * (CYBSP_I2C_CONTROLLER) as the display panel, so it is initialized after
+     * the panel. A missing sensor is not fatal: the demo keeps running. */
+    baro_rslt = baro_init(CYBSP_I2C_CONTROLLER_HW, &disp_i2c_controller_context);
+    if (CY_RSLT_SUCCESS != baro_rslt)
+    {
+        printf("DPS368 init failed (0x%08lx), altitude overlay disabled\r\n",
+               (unsigned long) baro_rslt);
+        baro_hud_draw(NULL);
+    }
+    else
+    {
+        printf("DPS368 ready. Press USER BTN2 to zero relative altitude\r\n");
+    }
 
     /* Set the frame buffer with the image pointer to be displayed on LCD */
     status = Cy_GFXSS_Set_FrameBuffer(base, (uint32_t*)graphics_buffer, &gfx_context);
@@ -407,11 +544,33 @@ static void cm55_ns_gfx_task(void *arg)
     NVIC_EnableIRQ(user_btn1_irq_cfg.intrSrc);
 
     user_button_flag = false;
+    user_button2_flag = false;
 
     printf("Press USER BTN1 button to enter ULPM\r\n\n");
 
     for (;;)
     {
+        /* Sample the barometer and refresh the overlay once per second */
+        if (baro_is_ready())
+        {
+            if (user_button2_flag)
+            {
+                user_button2_flag = false;
+                baro_zero_relative();
+                printf("Relative altitude zeroed\r\n");
+            }
+
+            if (CY_RSLT_SUCCESS == baro_update(&baro_data))
+            {
+                if (0U == (baro_sample_count % BARO_HUD_REFRESH_SAMPLES))
+                {
+                    baro_hud_draw(&baro_data);
+                    baro_print(&baro_data);
+                }
+                baro_sample_count++;
+            }
+        }
+
         /* Check for the USER BTN1 interrupt status */
         if (user_button_flag)
         {
@@ -450,6 +609,8 @@ static void cm55_ns_gfx_task(void *arg)
             /* Clear USER BTN1 interrupt flag */
             user_button_flag = false;
         }
+
+        vTaskDelay(pdMS_TO_TICKS(BARO_SAMPLE_PERIOD_MS));
     }
 }
 
@@ -498,6 +659,9 @@ int main(void)
 
     /* Enable global interrupts */
     __enable_irq();
+
+    /* Mutex for the I2C bus shared by display and sensors */
+    i2c_bus_init();
 
     /* Create the FreeRTOS Task */
     task_return = xTaskCreate(cm55_ns_gfx_task, GFX_TASK_NAME,
