@@ -81,8 +81,10 @@
 #define BARO_SAMPLE_PERIOD_MS               (200U)
 #define BARO_HUD_REFRESH_SAMPLES            (5U)
 
-/* Barometer overlay panel position / size on the 832x480 frame buffer */
-#define BARO_HUD_X                          (16U)
+/* Barometer overlay panel position / size on the 832x480 frame buffer.
+ * Placed top-right (x 384..784, inside the 800 px visible area) so it does
+ * not overlap the IMU panel in the top-left corner. */
+#define BARO_HUD_X                          (384U)
 #define BARO_HUD_Y                          (16U)
 #define BARO_HUD_SCALE                      (4U)
 #define BARO_HUD_LINES                      (4U)

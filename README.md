@@ -99,7 +99,7 @@ See [Using the code example](docs/using_the_code_example.md) for instructions on
 
 ## DPS368 barometer altitude overlay (HUD goggle prototype)
 
-The CM55 application also reads the on-board XENSIV&trade; DPS368 barometric pressure sensor (I2C address 0x77 on `CYBSP_I2C_CONTROLLER`, shared with the display) through the [sensor-xensiv-dps3xx](https://github.com/Infineon/sensor-xensiv-dps3xx) library and overlays the result in the top-left corner of the LCD:
+The CM55 application also reads the on-board XENSIV&trade; DPS368 barometric pressure sensor (I2C address 0x77 on `CYBSP_I2C_CONTROLLER`, shared with the display) through the [sensor-xensiv-dps3xx](https://github.com/Infineon/sensor-xensiv-dps3xx) library and overlays the result in the top-right corner of the LCD:
 
 Line | Content
 ---- | -------
