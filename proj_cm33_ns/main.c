@@ -48,6 +48,9 @@
 #include "cyabs_rtos.h"
 #include "cyabs_rtos_impl.h"
 
+#include "goggle_bt_app.h"
+#include "goggle_wifi.h"
+
 
 /*******************************************************************************
 * Macros
@@ -294,6 +297,13 @@ int main(void)
 
     /* Enable global interrupts */
     __enable_irq();
+
+    /* HUD goggle connectivity: shared mailbox, bonds, Bluetooth LE GATT
+     * server and the (normally off) Wi-Fi station. Must run before the CM55
+     * is enabled so that the mailbox is valid when the HUD starts reading.
+     * A failure is not fatal: the DSI ULPM demo keeps running. */
+    (void)goggle_bt_app_start();
+    (void)goggle_wifi_start();
 
     /* Create the FreeRTOS Task */
     result = xTaskCreate(cm33_ns_task, TASK_NAME, 
