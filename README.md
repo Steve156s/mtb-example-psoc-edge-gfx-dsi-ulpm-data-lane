@@ -97,6 +97,34 @@ See [Using the code example](docs/using_the_code_example.md) for instructions on
    ![](images/dsi-ulpm-exit-terminal-output.png)
 
 
+## BMM350 e-compass extension (HUD goggle prototype)
+
+> **Status:** not yet verified on hardware. Axis mapping, I2C address and the on-screen heading direction must be checked during board bring-up (see checklist below).
+
+The CM55 project additionally runs a BMM350 3-axis magnetometer service (`proj_cm55/compass/`) and shows the heading as a HUD tape in the bottom band of the screen:
+
+- Driver: Bosch Sensortec [BMM350_SensorAPI](https://github.com/boschsensortec/BMM350_SensorAPI) (BSD-3-Clause, copied unmodified into `proj_cm55/compass/bosch/bmm350/`). OTP compensation, magnetic reset and temperature compensation are done by the Bosch API; output is in µT.
+- Bus: `CYBSP_I2C_CONTROLLER` (SCB0, P8.0/P8.1 — on KIT_PSE84_AI this is the 1.8 V sensor bus). Address 0x14 is tried first, then 0x15. Transfers are serialised with a mutex in `mag_i2c.c`.
+- 25 Hz, 4× averaging, normal mode.
+- **Tilt compensation:** the math is implemented (`compass_tilt_compensated_heading()`, host-tested ±40° pitch/roll). Gravity comes from the weak hook `compass_port_get_gravity()`, which by default returns "not available": this module builds on its own, the board is assumed level and the HUD shows `LEVEL`. When the BMI270 module is merged, override the hook (example in `compass.h`).
+- **Calibration:** press **USER BTN2** and rotate the kit in a figure-8 for 20 s (press again to finish early). Hard-iron offset and diagonal soft-iron scale are computed from the min/max of each axis; the result is rejected if any axis moved less than 30 µT. The calibration is kept in RAM only (lost at reset). The HUD shows `CAL?` until a calibration is applied.
+- Heading is low-pass filtered on the unit circle (no 359°→0° jump), magnetic declination can be added with `COMPASS_DECLINATION_DEG`, and `MAG?` is shown when |B| is outside 20–80 µT (nearby steel / magnets).
+- All settings are in `proj_cm55/compass/compass_config.h` and can be overridden with `DEFINES+=` in the Makefile.
+
+**Figure 6. Compass HUD states (host-rendered preview: heading, warnings, calibration, sensor missing, starting)**
+
+![](images/compass-hud-preview.png)
+
+Bring-up checklist:
+
+1. UART shows `[compass] BMM350 found at 0x14` (or 0x15). If `NO MAG` is shown, check the address and the bus voltage.
+2. Lay the kit flat and turn it clockwise (seen from above): the heading must increase. If it decreases, fix `COMPASS_MAG_AXIS_MAP`.
+3. With the kit pointing at a fixed object, tilt it ±30°: the heading must stay within a few degrees. If not, (only with the gravity hook enabled) the BMM350 axes do not match the accelerometer frame — fix `COMPASS_MAG_AXIS_MAP`.
+4. Calibrate (USER BTN2) and compare with a phone compass in all four directions.
+5. For the goggle, set `COMPASS_FORWARD_AXIS` to the board axis that points where the wearer looks.
+
+The math and the HUD renderer have no MCU dependencies and have a host test: `cd tools/compass_host_test && make`.
+
 ## Related resources
 
 Resources  | Links

@@ -101,6 +101,12 @@ LDFLAGS+=
 # Additional / custom libraries to link in to the application.
 LDLIBS+=
 
+# BMM350 e-compass uses sinf/cosf/atan2f/sqrtf (libm). Arm Compiler and IAR
+# link the math library automatically.
+ifneq ($(filter GCC_ARM LLVM_ARM,$(TOOLCHAIN)),)
+LDLIBS+=-lm
+endif
+
 # Path to the linker script to use (if empty, use the default linker script).
 LINKER_SCRIPT=
 
