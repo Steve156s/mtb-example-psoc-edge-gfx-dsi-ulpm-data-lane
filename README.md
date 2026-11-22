@@ -97,6 +97,22 @@ See [Using the code example](docs/using_the_code_example.md) for instructions on
    ![](images/dsi-ulpm-exit-terminal-output.png)
 
 
+## Bluetooth LE / Wi-Fi HUD Link (HUD goggle prototype)
+
+> Not yet built with ModusToolbox and not yet tested on hardware.
+
+The CM33 non-secure application also runs the AIROC Bluetooth stack on the on-board CYW55513 (Murata 2FY; on KIT_PSE84_AI BT UART P10.0–P10.3, BT_REG_ON P11.0, SDIO P12.0–P12.5 / P21.0, WL_REG_ON P11.4). The goggle is an LE peripheral / GATT server with up to two links at once: the **LoRa Tracker** writes its GNSS fix, the team positions it receives over LoRa and team messages; the **phone** writes navigation / AI text, the time and Wi-Fi credentials. The CM33 publishes the data to the CM55 through a shared-memory mailbox in `m33_m55_shared`, and the CM55 draws a LINK panel on the right side of the LCD (x 528, y 196, 256 x 160 px):
+
+![](images/link-hud-preview.png)
+
+- Custom *HUD Link* GATT service (GNSS, team, message, goggle status notify, control, Wi-Fi credentials) plus Battery and Device Information services. Packet formats: *shared/goggle_link/goggle_link_proto.h*
+- LE Secure Connections pairing with the passkey shown on the HUD; bonds stored in RRAM. `make GOGGLE_LINK_SECURE=0` opens the writes for bring-up with a generic BLE app
+- Optional Wi-Fi station (off by default, provisioned over BLE, auto-off after 10 min). `make GOGGLE_WIFI=0` builds BLE only (product chip CYW55310 has no WLAN)
+- The CM55 keeps the debug UART; CM33 log lines are passed through the mailbox and printed with the prefix `[CM33]`
+- Host unit test (no ModusToolbox needed): `make -C tools/goggle_link_host_test run`; Tracker / phone simulator: `tools/ble_tracker_sim/goggle_ble_sim.py`
+- Design, CYW55513 vs CYW55310 and the BT PCM limitation of the kit: [docs/bt_wifi_connectivity.md](docs/bt_wifi_connectivity.md)
+
+
 ## Related resources
 
 Resources  | Links

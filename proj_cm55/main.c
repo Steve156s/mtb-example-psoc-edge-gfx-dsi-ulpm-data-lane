@@ -54,13 +54,20 @@
 
 #include "infineon_logo.h"
 
+#include <stdio.h>
+#include <string.h>
+
+#include "goggle_link_shm.h"
+#include "goggle_link_hud.h"
+
 
 /*******************************************************************************
 * Macros
 *******************************************************************************/
 #define GFX_TASK_NAME                       ("CM55 Gfx Task")
 /* stack size in words */
-#define GFX_TASK_STACK_SIZE                 (configMINIMAL_STACK_SIZE * 3)
+/* Increased from 3x to 5x for the snprintf calls of the LINK panel */
+#define GFX_TASK_STACK_SIZE                 (configMINIMAL_STACK_SIZE * 5)
 
 #define GFX_TASK_PRIORITY                   (configMAX_PRIORITIES - 1)
 
@@ -83,6 +90,21 @@
  */
 #define LPTIMER_1_WAIT_TIME_USEC            (62U)
 
+/* Idle wait of the GFX task per loop. Without it the highest-priority GFX
+ * task spins (the original demo only polls the button flag). */
+#define GFX_TASK_POLL_DELAY_MS              (20U)
+
+/* LINK panel (Bluetooth / Wi-Fi / Tracker / team) on the right side, mirror
+ * of the SHT40 panel position used in the other sensor PRs. Redrawn when
+ * the CM33 publishes new data, and once per second for the age counters. */
+/* The frame buffer stride is IMAGE_WIDTH (832) but the Waveshare panel
+ * shows 800 columns, so the panel is placed against x = 800. */
+#define LINK_HUD_VISIBLE_W                  (800U)
+#define LINK_HUD_X                          (LINK_HUD_VISIBLE_W - 16U - GL_HUD_WIDTH)
+#define LINK_HUD_Y                          (196U)
+#define LINK_HUD_REFRESH_MS                 (1000U)
+#define LINK_STATUS_PERIOD_MS               (1000U)
+
 /* Define the LPTimer interrupt priority number. '1' implies highest priority.
  */
 #define APP_LPTIMER_INTERRUPT_PRIORITY      (1U)
@@ -96,6 +118,9 @@ GFXSS_Type* base = (GFXSS_Type*) GFXSS;
 cy_stc_gfx_context_t gfx_context;
 
 volatile bool user_button_flag = false;
+
+/* Last mailbox sequence drawn on the LINK panel */
+static uint32_t link_hud_seq = 0xFFFFFFFFUL;
 
 CY_SECTION(".cy_gpu_buf") uint8_t graphics_buffer[IMAGE_SIZE] = {0xFF};
 
@@ -297,6 +322,103 @@ static void button_isr_handler(void)
 
 
 /*******************************************************************************
+* Function Name: gl_port_fill_status
+********************************************************************************
+* Summary:
+*   Weak hook: fills the goggle status that the CM33 notifies to the Tracker
+*   and the phone (battery, speed, heading, altitude, temperature). On this
+*   branch no sensor task runs, so everything is reported as unknown. The
+*   sensor PRs (BMI270 / BMM350 / DPS368 / SHT40) or the fuel gauge driver
+*   override it.
+*
+* Parameters:
+*  st : status to fill (pre-set to "unknown")
+*
+*******************************************************************************/
+__attribute__((weak)) void gl_port_fill_status(gl_status_t* st)
+{
+    (void)st;
+}
+
+static void link_status_fill(gl_up_t* u, void* ctx)
+{
+    (void)ctx;
+    u->status.battery_pct  = 0xFFU;
+    u->status.flags        = 0U;
+    u->status.speed_cms    = 0U;
+    u->status.heading_cdeg = 0xFFFFU;
+    u->status.alt_dm       = 0;
+    u->status.temp_c10     = 0;
+    gl_port_fill_status(&u->status);
+}
+
+
+/*******************************************************************************
+* Function Name: link_hud_service
+********************************************************************************
+* Summary:
+*   Called every loop of the GFX task:
+*   - prints the CM33 log lines queued in the shared-memory ring
+*   - redraws the LINK panel when the CM33 published new data (or every
+*     LINK_HUD_REFRESH_MS for the "LOST 12S" style age counters) and flushes
+*     the D-cache for the panel lines
+*   - publishes the goggle status for the CM33 once per second
+*
+* Parameters:
+*  force : redraw even if nothing changed
+*
+*******************************************************************************/
+static void link_hud_service(bool force)
+{
+    static TickType_t last_draw = 0U;
+    static TickType_t last_status = 0U;
+    static gl_down_t snap;
+    char log_chunk[128];
+    size_t n;
+    TickType_t now = xTaskGetTickCount();
+
+    /* CM33 log -> UART (the CM55 owns retarget-io) */
+    while ((n = gl_shm_log_pop(log_chunk, sizeof(log_chunk))) > 0U)
+    {
+        printf("%.*s", (int)n, log_chunk);
+    }
+
+    if (!gl_shm_ready())
+    {
+        if (force)
+        {
+            gl_hud_draw((uint16_t*)graphics_buffer, IMAGE_WIDTH, IMAGE_HEIGHT,
+                        LINK_HUD_X, LINK_HUD_Y, NULL);
+        }
+        return;
+    }
+
+    if ((now - last_status) >= pdMS_TO_TICKS(LINK_STATUS_PERIOD_MS))
+    {
+        last_status = now;
+        gl_shm_up_write(link_status_fill, NULL);
+    }
+
+    if (gl_shm_down_read(&snap) &&
+        (force || (snap.seq != link_hud_seq) ||
+         ((now - last_draw) >= pdMS_TO_TICKS(LINK_HUD_REFRESH_MS))))
+    {
+        link_hud_seq = snap.seq;
+        last_draw = now;
+
+        gl_hud_draw((uint16_t*)graphics_buffer, IMAGE_WIDTH, IMAGE_HEIGHT,
+                    LINK_HUD_X, LINK_HUD_Y, &snap);
+
+#if defined(__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
+        /* Make the CPU writes visible to the display controller (whole lines) */
+        SCB_CleanDCache_by_Addr((volatile void*)&graphics_buffer[LINK_HUD_Y * IMAGE_WIDTH * COLOR_DEPTH],
+                                (int32_t)(GL_HUD_HEIGHT * IMAGE_WIDTH * COLOR_DEPTH));
+#endif
+    }
+}
+
+
+/*******************************************************************************
 * Function Name: cm55_ns_gfx_task
 ********************************************************************************
 * Summary:
@@ -393,6 +515,9 @@ static void cm55_ns_gfx_task(void *arg)
 
     memcpy(graphics_buffer, img_ptr, sizeof(img_ptr));
 
+    /* First draw of the LINK panel before the frame buffer is shown */
+    link_hud_service(true);
+
     /* Set the frame buffer with the image pointer to be displayed on LCD */
     status = Cy_GFXSS_Set_FrameBuffer(base, (uint32_t*)graphics_buffer, &gfx_context);
 
@@ -412,6 +537,9 @@ static void cm55_ns_gfx_task(void *arg)
 
     for (;;)
     {
+        /* Bluetooth / Wi-Fi LINK panel and CM33 log */
+        link_hud_service(false);
+
         /* Check for the USER BTN1 interrupt status */
         if (user_button_flag)
         {
@@ -449,7 +577,12 @@ static void cm55_ns_gfx_task(void *arg)
 
             /* Clear USER BTN1 interrupt flag */
             user_button_flag = false;
+
+            /* the panel was not refreshed during ULPM */
+            link_hud_service(true);
         }
+
+        vTaskDelay(pdMS_TO_TICKS(GFX_TASK_POLL_DELAY_MS));
     }
 }
 

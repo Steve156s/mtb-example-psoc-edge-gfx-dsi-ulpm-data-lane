@@ -55,6 +55,19 @@ VERBOSE=
 #
 COMPONENTS+=FREERTOS RTOS_AWARE 
 
+# HUD goggle connectivity on the CYW55513 (KIT_PSE84_AI / KIT_PSE84_EVAL):
+# AIROC BT stack (LE only) + Wi-Fi Connection Manager with lwIP / mbedTLS.
+# Same component set as the Infineon example
+# mtb-example-psoc-edge-btstack-wifi-onboarding.
+#   GOGGLE_WIFI=1 : BLE + Wi-Fi (CYW55513 combo chip, default)
+#   GOGGLE_WIFI=0 : BLE only (product CYW55310 has no WLAN; also delete
+#                   deps/wifi-core-freertos-lwip-mbedtls.mtb)
+GOGGLE_WIFI?=1
+COMPONENTS+=WICED_BLE
+ifeq ($(GOGGLE_WIFI),1)
+COMPONENTS+=LWIP MBEDTLS WCM SECURE_SOCKETS
+endif
+
 # Like COMPONENTS, but disable optional code that was enabled by default.
 DISABLE_COMPONENTS=
 
@@ -65,14 +78,31 @@ CORE_NAME=CM33_0
 # tree for source code and builds it. The SOURCES variable can be used to
 # manually add source code to the build process from a location not searched
 # by default, or otherwise not found by the build system.
-SOURCES+=
+SOURCES+=$(wildcard ../shared/goggle_link/*.c)
 
 # Like SOURCES, but for include directories. Value should be paths to
 # directories (without a leading -I).
-INCLUDES+=
+INCLUDES+=../shared/goggle_link ./connectivity
 
 # Add additional defines to the build process (without a leading -D).
 DEFINES+=CY_RETARGET_IO_CONVERT_LF_TO_CRLF
+
+# Connectivity (values from the Infineon Wi-Fi onboarding example)
+DEFINES+=CY_RTOS_AWARE GOGGLE_WIFI_ENABLE=$(GOGGLE_WIFI)
+ifeq ($(GOGGLE_WIFI),1)
+MBEDTLSFLAGS=MBEDTLS_USER_CONFIG_FILE='"configs/mbedtls_user_config.h"'
+DEFINES+=$(MBEDTLSFLAGS) CYBSP_WIFI_CAPABLE
+DEFINES+=IFX_TF_PSA IFX_TF_PSA_CRYPTO
+DEFINES+=TF_PSA_CRYPTO_CONFIG_FILE='"configs/tf_psa_crypto_config.h"'
+DEFINES+=TF_PSA_CRYPTO_USER_CONFIG_FILE='"configs/tf_psa_crypto_user_config.h"'
+endif
+DEFINES+=CYBSP_BT_PLATFORM_CFG_BAUD_DOWNLOAD=3000000
+DEFINES+=CYBSP_BT_PLATFORM_CFG_BAUD_FEATURE=3000000
+
+# 1 = every HUD Link write needs an encrypted (paired) link (default).
+# 0 = open writes, only for bring-up with a generic BLE app.
+GOGGLE_LINK_SECURE?=1
+DEFINES+=GOGGLE_LINK_SECURE=$(GOGGLE_LINK_SECURE)
 
 # Select softfp or hardfp floating point. Default is softfp.
 VFP_SELECT+=
