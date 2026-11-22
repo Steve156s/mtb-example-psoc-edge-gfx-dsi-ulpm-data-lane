@@ -57,13 +57,16 @@
 #include "imu_bmi270.h"
 #include "i2c_bus.h"
 
+#include "compass.h"
+#include "compass_hud.h"
+
 
 /*******************************************************************************
 * Macros
 *******************************************************************************/
 #define GFX_TASK_NAME                       ("CM55 Gfx Task")
 /* stack size in words */
-#define GFX_TASK_STACK_SIZE                 (configMINIMAL_STACK_SIZE * 3)
+#define GFX_TASK_STACK_SIZE                 (configMINIMAL_STACK_SIZE * 4)
 
 #define GFX_TASK_PRIORITY                   (configMAX_PRIORITIES - 1)
 
@@ -78,6 +81,13 @@
 
 /* Visible width of the Waveshare 4.3" panel; the buffer stride is IMAGE_WIDTH */
 #define DISPLAY_VISIBLE_WIDTH               (800U)
+
+/* BMM350 e-compass: sensor task priority (below the graphics task), HUD
+ * refresh period and position. The compass tape uses the bottom band of the
+ * screen; the top is used by the IMU (left) and barometer (right) panels. */
+#define COMPASS_TASK_PRIORITY               (configMAX_PRIORITIES - 2)
+#define COMPASS_HUD_REFRESH_MS              (60U)
+#define COMPASS_HUD_FIRST_ROW               (IMAGE_HEIGHT - COMPASS_HUD_BAND_HEIGHT)
 
 #define SET_VAL                             (1U)
 
@@ -106,6 +116,9 @@ GFXSS_Type* base = (GFXSS_Type*) GFXSS;
 cy_stc_gfx_context_t gfx_context;
 
 volatile bool user_button_flag = false;
+
+/* true while the DSI data lane is in ULPM: the compass HUD is not redrawn */
+static bool dsi_in_ulpm = false;
 
 CY_SECTION(".cy_gpu_buf") uint8_t graphics_buffer[IMAGE_SIZE] = {0xFF};
 
@@ -292,17 +305,67 @@ static void button_isr_handler(void)
         NVIC_ClearPendingIRQ(CYBSP_USER_BTN_IRQ);
     }
 
-    /* USER_BTN2 pin is present on the same GPIO port as USER_BTN1 pin */
-    /* This cause the ISR to execute even when USER_BTN2 is pressed accidentally */
-    /* To handle such scenarios we clear the interrupt */
+    /* USER_BTN2 pin is present on the same GPIO port as USER_BTN1 pin and
+     * shares its IRQ line; it is used here to trigger compass calibration.
+     */
     
     /* Check if USER_BTN2 was pressed */
     if(1UL == Cy_GPIO_GetInterruptStatus(CYBSP_USER_BTN2_PORT, CYBSP_USER_BTN2_PIN))
     {
+        /* USER BTN2 starts / finishes the BMM350 figure-8 calibration */
+        compass_request_calibration();
+
         /* Clear the USER_BTN2 interrupt */
         Cy_GPIO_ClearInterrupt(CYBSP_USER_BTN2_PORT, CYBSP_USER_BTN2_PIN);
         NVIC_ClearPendingIRQ(CYBSP_USER_BTN2_IRQ);
     }
+}
+
+
+/*******************************************************************************
+* Function Name: compass_hud_update
+********************************************************************************
+* Summary:
+*   Renders the latest BMM350 heading into the bottom band of the frame
+*   buffer. Single buffered: a little tearing is acceptable for this demo.
+*
+* Parameters:
+*  void
+*
+* Return:
+*  void
+*******************************************************************************/
+static void compass_hud_update(void)
+{
+    compass_state_t cs;
+    compass_hud_view_t view;
+    uint8_t *band = &graphics_buffer[COMPASS_HUD_FIRST_ROW * IMAGE_WIDTH * COLOR_DEPTH];
+
+    compass_get_state(&cs);
+
+    switch (cs.status)
+    {
+        case COMPASS_STATUS_OK:          view.mode = COMPASS_HUD_MODE_HEADING;     break;
+        case COMPASS_STATUS_CALIBRATING: view.mode = COMPASS_HUD_MODE_CALIBRATING; break;
+        case COMPASS_STATUS_NO_SENSOR:   view.mode = COMPASS_HUD_MODE_NO_SENSOR;   break;
+        case COMPASS_STATUS_ERROR:       view.mode = COMPASS_HUD_MODE_ERROR;       break;
+        case COMPASS_STATUS_INIT:
+        default:                         view.mode = COMPASS_HUD_MODE_WAIT;        break;
+    }
+
+    view.heading_deg      = cs.heading_deg;
+    view.cal_progress     = cs.cal_progress;
+    view.cal_valid        = cs.cal_valid;
+    view.tilt_compensated = cs.tilt_compensated;
+    view.interference     = cs.interference;
+
+    compass_hud_draw((uint16_t *) band, IMAGE_WIDTH, DISPLAY_VISIBLE_WIDTH, &view);
+
+#if defined(__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
+    /* Make the CPU writes visible to the display controller */
+    SCB_CleanDCache_by_Addr((volatile void *) band,
+                            (int32_t) (COMPASS_HUD_BAND_HEIGHT * IMAGE_WIDTH * COLOR_DEPTH));
+#endif
 }
 
 
@@ -433,15 +496,36 @@ static void cm55_ns_gfx_task(void *arg)
         }
     }
 
+    /* Start the BMM350 e-compass (same I2C controller, serialised through
+     * i2c_bus). Tilt compensation uses the gravity vector of the IMU task. */
+    if (CY_RSLT_SUCCESS != compass_start(CYBSP_I2C_CONTROLLER_HW,
+                                         &disp_i2c_controller_context,
+                                         COMPASS_TASK_PRIORITY))
+    {
+        printf("Compass task creation failed\r\n");
+    }
+
+    compass_hud_update();
+
     /* Enable USER BTN1 interrupt */
     NVIC_EnableIRQ(user_btn1_irq_cfg.intrSrc);
 
     user_button_flag = false;
 
-    printf("Press USER BTN1 button to enter ULPM\r\n\n");
+    printf("Press USER BTN1 button to enter ULPM\r\n");
+    printf("Press USER BTN2 button to calibrate the compass (rotate in a figure-8)\r\n\n");
+
+    TickType_t last_hud = xTaskGetTickCount();
 
     for (;;)
     {
+        if ((!dsi_in_ulpm) &&
+            ((xTaskGetTickCount() - last_hud) >= pdMS_TO_TICKS(COMPASS_HUD_REFRESH_MS)))
+        {
+            last_hud = xTaskGetTickCount();
+            compass_hud_update();
+        }
+
         /* Check for the USER BTN1 interrupt status */
         if (user_button_flag)
         {
@@ -462,6 +546,7 @@ static void cm55_ns_gfx_task(void *arg)
                 handle_app_error();
             }
 
+            dsi_in_ulpm = true;
             Cy_GPIO_Write(CYBSP_USER_LED_PORT, CYBSP_USER_LED_PIN, GPIO_HIGH);
 
             vTaskDelay(pdMS_TO_TICKS(DSI_ULPM_TIME_INTERVAL_MS));
@@ -474,6 +559,7 @@ static void cm55_ns_gfx_task(void *arg)
                 handle_app_error();
             }
 
+            dsi_in_ulpm = false;
             Cy_GPIO_Write(CYBSP_USER_LED_PORT, CYBSP_USER_LED_PIN, GPIO_LOW);
             printf("Exited ULPM with SUCCESS: Press to enter again ULPM\r\n\n");
 
@@ -481,7 +567,7 @@ static void cm55_ns_gfx_task(void *arg)
             user_button_flag = false;
         }
 
-        /* Yield so lower-priority tasks (IMU) can run */
+        /* Yield so lower-priority tasks (IMU, compass) can run */
         vTaskDelay(pdMS_TO_TICKS(GFX_TASK_POLL_DELAY_MS));
     }
 }
