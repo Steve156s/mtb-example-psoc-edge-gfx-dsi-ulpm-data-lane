@@ -54,6 +54,8 @@
 
 #include "infineon_logo.h"
 
+#include "imu_bmi270.h"
+
 
 /*******************************************************************************
 * Macros
@@ -68,6 +70,13 @@
 #define BTN_DEBOUNCE_DELAY_MS               (10U)
 
 #define DSI_ULPM_TIME_INTERVAL_MS           (6000U)
+
+/* Idle wait of the GFX task between button checks. Without it the
+ * highest-priority task spins and starves the IMU task. */
+#define GFX_TASK_POLL_DELAY_MS              (20U)
+
+/* Visible width of the Waveshare 4.3" panel; the buffer stride is IMAGE_WIDTH */
+#define DISPLAY_VISIBLE_WIDTH               (800U)
 
 #define SET_VAL                             (1U)
 
@@ -403,6 +412,24 @@ static void cm55_ns_gfx_task(void *arg)
         handle_app_error();
     }
 
+    /* Start the BMI270 IMU service. It shares the display I2C controller
+     * (already initialised above) and draws pitch / roll / impact on the
+     * top-left corner of the frame buffer. */
+    {
+        const hud_surface_t hud =
+        {
+            .pixels = (uint16_t *)graphics_buffer,
+            .stride = IMAGE_WIDTH,
+            .width  = DISPLAY_VISIBLE_WIDTH,
+            .height = IMAGE_HEIGHT,
+        };
+
+        if (CY_RSLT_SUCCESS != imu_bmi270_start(&disp_i2c_controller_context, &hud))
+        {
+            printf("IMU task creation failed\r\n");
+        }
+    }
+
     /* Enable USER BTN1 interrupt */
     NVIC_EnableIRQ(user_btn1_irq_cfg.intrSrc);
 
@@ -450,6 +477,9 @@ static void cm55_ns_gfx_task(void *arg)
             /* Clear USER BTN1 interrupt flag */
             user_button_flag = false;
         }
+
+        /* Yield so lower-priority tasks (IMU) can run */
+        vTaskDelay(pdMS_TO_TICKS(GFX_TASK_POLL_DELAY_MS));
     }
 }
 
