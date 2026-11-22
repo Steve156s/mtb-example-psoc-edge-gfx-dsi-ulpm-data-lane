@@ -71,6 +71,12 @@
  */
 #define LPTIMER_0_WAIT_TIME_USEC            (62U)
 
+/* RTC: the time counts as set from 2025 on (two digit RTC year). Must match
+ * RTC_VALID_MIN_YEAR in proj_cm55/rtc/rtc_clock.h. */
+#define RTC_VALID_MIN_YEAR_2DIGIT           (25U)
+#define RTC_ACCESS_RETRY_COUNT              (200U)
+#define RTC_RETRY_DELAY_MS                  (5U)
+
 /* Define the LPTimer interrupt priority number. '1' implies highest priority. 
  */
 #define APP_LPTIMER_INTERRUPT_PRIORITY      (1U)
@@ -128,9 +134,30 @@ static void handle_error(void)
 *******************************************************************************/
 static void setup_clib_support(void)
 {
-    /* RTC Initialization */
-    Cy_RTC_Init(&CYBSP_RTC_config);
-    Cy_RTC_SetDateAndTime(&CYBSP_RTC_config);
+    cy_stc_rtc_config_t now;
+    cy_en_rtc_status_t rtc_status;
+    uint32_t retry = RTC_ACCESS_RETRY_COUNT;
+
+    /* The RTC runs from the 32.768 kHz WCO in the backup domain and keeps
+     * counting across a warm reset, Deep Sleep and Hibernate. Load the BSP
+     * default date (2024-01-01 12:00, "not set") only if the RTC does not
+     * hold a time set by the CM55 clock (UART / GNSS / phone) yet, so that a
+     * reset does not lose the time. See proj_cm55/rtc/rtc_clock.h. */
+    Cy_RTC_GetDateAndTime(&now);
+    if ((now.year < RTC_VALID_MIN_YEAR_2DIGIT) || (now.year > 99U) ||
+        (now.month < 1U) || (now.month > 12U) ||
+        (now.date < 1U) || (now.date > 31U) ||
+        (now.hour > 23U) || (now.min > 59U) || (now.sec > 59U))
+    {
+        do
+        {
+            rtc_status = Cy_RTC_Init(&CYBSP_RTC_config);
+            if (CY_RTC_SUCCESS != rtc_status)
+            {
+                Cy_SysLib_Delay(RTC_RETRY_DELAY_MS);
+            }
+        } while ((CY_RTC_SUCCESS != rtc_status) && (0U != --retry));
+    }
 
     /* Initialize the ModusToolbox CLIB support library */
     mtb_clib_support_init(&rtc_obj);
