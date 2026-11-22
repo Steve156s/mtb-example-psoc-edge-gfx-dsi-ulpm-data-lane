@@ -55,6 +55,7 @@
 #include "infineon_logo.h"
 
 #include "imu_bmi270.h"
+#include "i2c_bus.h"
 
 
 /*******************************************************************************
@@ -390,9 +391,11 @@ static void cm55_ns_gfx_task(void *arg)
     /* Enable the I2C */
     Cy_SCB_I2C_Enable(CYBSP_I2C_CONTROLLER_HW);
 
-    /* Initialize the display */
+    /* Initialize the display (holds the shared I2C bus while doing so) */
+    (void)i2c_bus_lock(I2C_BUS_WAIT_FOREVER);
     panel_status = mtb_disp_waveshare_4p3_init(CYBSP_I2C_CONTROLLER_HW,
                                                 &disp_i2c_controller_context);
+    i2c_bus_unlock();
 
     if (CY_RSLT_SUCCESS != panel_status)
     {
@@ -528,6 +531,9 @@ int main(void)
 
     /* Enable global interrupts */
     __enable_irq();
+
+    /* Mutex for the I2C bus shared by display and sensors */
+    i2c_bus_init();
 
     /* Create the FreeRTOS Task */
     task_return = xTaskCreate(cm55_ns_gfx_task, GFX_TASK_NAME,

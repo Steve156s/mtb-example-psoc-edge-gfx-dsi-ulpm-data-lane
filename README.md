@@ -111,6 +111,8 @@ The CM55 project additionally runs a BMI270 6-axis IMU service (`proj_cm55/imu/`
 
 Other modules can read the result with `imu_get_attitude(&pitch, &roll)` (e.g. tilt-compensated heading), `imu_get_state()` and `imu_take_events()`. Use `IMU_AXIS_REMAP` to map the sensor axes to the goggle frame.
 
+All transfers on `CYBSP_I2C_CONTROLLER` (display init, IMU) are serialised with the recursive mutex in `proj_cm55/i2c_bus.h` (`i2c_bus_lock()` / `i2c_bus_unlock()`); other sensors on that bus must use it too.
+
 The motion logic has no MCU dependencies and has a host test: `cd tools/imu_host_test && make`.
 
 ## Related resources

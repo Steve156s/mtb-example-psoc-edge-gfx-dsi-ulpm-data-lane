@@ -17,6 +17,8 @@
 #include "mtb_hal.h"
 #include "mtb_bmi270.h"
 
+#include "i2c_bus.h"
+
 #include "FreeRTOS.h"
 #include "task.h"
 
@@ -36,6 +38,7 @@
 #define GYRO_BIAS_MAX_SPREAD_DPS    (3.0f)    /* reject if board moved     */
 
 #define INIT_RETRY_DELAY_MS         (2000U)
+#define I2C_LOCK_TIMEOUT_MS         (50U)
 
 #define IMU_RSLT_ERROR              CY_RSLT_CREATE(CY_RSLT_TYPE_ERROR, \
                                         CY_RSLT_MODULE_MIDDLEWARE_BASE, 0x270U)
@@ -77,7 +80,7 @@ static void state_copy_out(imu_state_t *out)
     taskEXIT_CRITICAL();
 }
 
-static cy_rslt_t sensor_init(void)
+static cy_rslt_t sensor_init_locked(void)
 {
     cy_rslt_t result;
     struct bmi2_sens_config cfg = { 0 };
@@ -141,13 +144,34 @@ static cy_rslt_t sensor_init(void)
     return CY_RSLT_SUCCESS;
 }
 
+static cy_rslt_t sensor_init(void)
+{
+    cy_rslt_t result;
+
+    /* Config file upload takes a while: wait as long as needed */
+    if (!i2c_bus_lock(I2C_BUS_WAIT_FOREVER))
+    {
+        return IMU_RSLT_ERROR;
+    }
+    result = sensor_init_locked();
+    i2c_bus_unlock();
+    return result;
+}
+
 /* Reads one sample and converts to g / dps in the goggle frame. */
 static cy_rslt_t sensor_read(float acc_g[3], float gyr_dps[3])
 {
     mtb_bmi270_data_t data;
     float a_raw[3];
     float g_raw[3];
-    cy_rslt_t result = mtb_bmi270_read(&imu_dev, &data);
+    cy_rslt_t result;
+
+    if (!i2c_bus_lock(I2C_LOCK_TIMEOUT_MS))
+    {
+        return IMU_RSLT_ERROR;   /* bus busy: skip this sample */
+    }
+    result = mtb_bmi270_read(&imu_dev, &data);
+    i2c_bus_unlock();
 
     if (CY_RSLT_SUCCESS != result)
     {
