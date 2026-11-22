@@ -97,6 +97,42 @@ See [Using the code example](docs/using_the_code_example.md) for instructions on
    ![](images/dsi-ulpm-exit-terminal-output.png)
 
 
+## 60 GHz radar gesture control (HUD goggle prototype)
+
+> **Status: not yet built with ModusToolbox and not yet tested on hardware.** The signal processing and gesture logic are verified only with synthetic radar frames on a PC (`tools/radar_host_test`).
+
+The CM55 application drives the on-board Infineon XENSIV&trade; BGT60TR13C 60 GHz radar of the [PSOC&trade; Edge E84 AI Kit](https://www.infineon.com/KIT_PSE84_AI) and switches HUD pages with hand gestures, so that a skier can operate the goggle with a gloved hand (60 GHz passes through glove fabric; the hand is detected at 6 - 45 cm in front of the sensor):
+
+![](images/radar-hud-preview.png)
+
+Gesture | HUD action
+------- | ----------
+`SWIPE RIGHT` | next page (SPEED -> NAV -> TEAM -> RADAR -> SPEED)
+`SWIPE LEFT`  | previous page
+`SWIPE UP`    | home page (SPEED)
+`SWIPE DOWN`  | RADAR page (live range / azimuth / elevation)
+`PUSH`        | select; in this demo it starts the 6 s DSI ULPM (screen off), like USER BTN1. Disable with `DEFINES+=RADAR_PUSH_ENTERS_ULPM=0`
+
+The panel is drawn on the right side of the LCD (x 512, y 196, 304 x 151 px). The SPEED / NAV / TEAM values are placeholders (`--`) until the sensor demos are merged.
+
+**Hardware** (KIT_PSE84_AI schematic 630-60751-01 Rev03): SPI MISO P21.4, MOSI P21.5, CLK P21.6, CS P21.7; IRQ P20.3; RST P20.7. The code uses the BSP names `CYBSP_SPI_CONTROLLER_*`, `CYBSP_RSPI_*` and `CYBSP_RADAR_*`, as in the Infineon code example [mtb-example-psoc-edge-ml-deepcraft-deploy-radar](https://github.com/Infineon/mtb-example-psoc-edge-ml-deepcraft-deploy-radar). The radar needs `TARGET=KIT_PSE84_AI` (add the BSP with the Library Manager). With a BSP that has no radar (such as the default `KIT_PSE84_EVAL_EPC2`) the radar task is not started, the panel shows `RADAR N/A BTN2` and USER BTN2 switches pages instead. Whether the rest of this example (Waveshare display connection, USER BTN1/BTN2 names) works unchanged on KIT_PSE84_AI has not been checked.
+
+**Processing** (one frame every 30 ms, 64 samples x 32 chirps x 3 RX, 58.5 - 62.5 GHz; the gesture preset of the Infineon example, *proj_cm55/radar/radar_settings.h*):
+
+1. The FIFO interrupt (one frame = 6144 samples) wakes the *Radar Task*, which reads the frame with `xensiv_bgt60trxx_get_fifo_data()` ([sensor-xensiv-bgt60trxx](https://github.com/Infineon/sensor-xensiv-bgt60trxx) 2.x, PSOC Edge PDL SPI port). FIFO overflow or a missing interrupt for 500 ms restarts the sensor
+2. `radar_dsp.c`: DC removal, Hann window and 64-point FFT per chirp and antenna (3.75 cm range bins); subtraction of a static clutter map (goggle frame, face, helmet); strongest range bin inside 6 - 45 cm with an adaptive noise floor; azimuth from the RX1/RX3 phase, elevation from RX2/RX3, radial velocity from the chirp-to-chirp phase
+3. `radar_gesture.c`: a hand "track" starts after 2 detected frames and ends after 3 missed frames (or 1.5 s); it is classified from the change of azimuth / elevation (>= 25&deg;, swipe) or range (>= 7 cm closer, push), followed by a 360 ms cooldown
+4. The GFX task pops gestures from a queue, changes the page, shows a 1.2 s toast and redraws the panel (every 200 ms for the live RADAR page). One UART line per gesture, for example
+   `Radar: gesture SWIPE RIGHT (frames 12, d_az +73.6 deg, d_el +0.0 deg, d_range -0.0 cm)`
+
+- All thresholds and the antenna mapping are in *proj_cm55/radar/radar_config.h* and can be overridden with `DEFINES+=...`. If swipes come out mirrored for the way the board is mounted, set `RADAR_AZ_SIGN=-1` (or `RADAR_EL_SIGN=-1`)
+- The product code overrides the weak hook `radar_port_on_gesture()` (*radar_task.h*) to forward gestures to the UI. The rule-based recognizer can later be replaced with Infineon's gesture model (DEEPCRAFT&trade; Studio / xensiv-radar-gestures) using the same frame data
+- Possible extensions with the same radar: goggle wear detection (static reflector at 1 - 3 cm with breathing micro-motion -> wake / sleep the HUD) and vital signs (breathing / heart rate); not implemented
+- The GFX task now waits 20 ms per loop (`GFX_TASK_POLL_DELAY_MS`) so that it does not starve other tasks, and its stack was increased from 3x to 5x `configMINIMAL_STACK_SIZE`
+- Sources: *proj_cm55/radar/* (`radar_task.c` = sensor bring-up and task, `radar_dsp.c` = signal processing, `radar_gesture.c` = gesture state machine, `radar_hud.c` = page model and panel renderer). Dependency: *proj_cm55/deps/sensor-xensiv-bgt60trxx.mtb*
+- Host test with synthetic radar frames (swipes, push, hover, jitter, clutter only, sequence) and the panel preview, no ModusToolbox needed: `make -C tools/radar_host_test run`
+
+
 ## Related resources
 
 Resources  | Links

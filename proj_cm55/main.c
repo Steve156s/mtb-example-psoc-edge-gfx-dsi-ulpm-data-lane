@@ -39,6 +39,9 @@
 /*******************************************************************************
 * Header Files
 *******************************************************************************/
+#include <stdio.h>
+#include <string.h>
+
 #include "cy_graphics.h"
 
 #include "cy_time.h"
@@ -54,13 +57,18 @@
 
 #include "infineon_logo.h"
 
+#include "radar_config.h"
+#include "radar_hud.h"
+#include "radar_task.h"
+
 
 /*******************************************************************************
 * Macros
 *******************************************************************************/
 #define GFX_TASK_NAME                       ("CM55 Gfx Task")
 /* stack size in words */
-#define GFX_TASK_STACK_SIZE                 (configMINIMAL_STACK_SIZE * 3)
+/* Increased from 3x to 5x for snprintf used by the radar HUD panel */
+#define GFX_TASK_STACK_SIZE                 (configMINIMAL_STACK_SIZE * 5)
 
 #define GFX_TASK_PRIORITY                   (configMAX_PRIORITIES - 1)
 
@@ -83,6 +91,19 @@
  */
 #define LPTIMER_1_WAIT_TIME_USEC            (62U)
 
+/* Idle wait of the GFX task between checks. Without it the GFX task spins
+ * and starves the other tasks. */
+#define GFX_TASK_POLL_DELAY_MS              (20U)
+
+/* 60 GHz radar gesture control: the radar task must read each frame within
+ * ~20 ms of the FIFO interrupt, so it runs at the same (highest) priority as
+ * the GFX task. The HUD panel sits on the right, mirroring the left-side
+ * panel position used by the other sensor demos. */
+#define RADAR_TASK_PRIORITY                 (configMAX_PRIORITIES - 1)
+#define RADAR_HUD_REFRESH_MS                (200U)
+#define RADAR_HUD_X                         (IMAGE_WIDTH - 16U - RADAR_HUD_WIDTH)
+#define RADAR_HUD_Y                         (196U)
+
 /* Define the LPTimer interrupt priority number. '1' implies highest priority.
  */
 #define APP_LPTIMER_INTERRUPT_PRIORITY      (1U)
@@ -96,6 +117,17 @@ GFXSS_Type* base = (GFXSS_Type*) GFXSS;
 cy_stc_gfx_context_t gfx_context;
 
 volatile bool user_button_flag = false;
+
+/* USER BTN2: next HUD page (fallback when the kit has no radar) */
+volatile bool user_button2_flag = false;
+
+/* true while the DSI data lane is in ULPM: the HUD panel is not redrawn */
+static bool dsi_in_ulpm = false;
+
+/* HUD page state, switched by radar gestures */
+static hud_page_t hud_page = HUD_PAGE_SPEED;
+static radar_gesture_t hud_last_gesture = RADAR_GESTURE_NONE;
+static TickType_t hud_toast_tick = 0;
 
 CY_SECTION(".cy_gpu_buf") uint8_t graphics_buffer[IMAGE_SIZE] = {0xFF};
 
@@ -289,10 +321,85 @@ static void button_isr_handler(void)
     /* Check if USER_BTN2 was pressed */
     if(1UL == Cy_GPIO_GetInterruptStatus(CYBSP_USER_BTN2_PORT, CYBSP_USER_BTN2_PIN))
     {
+        user_button2_flag = true;
         /* Clear the USER_BTN2 interrupt */
         Cy_GPIO_ClearInterrupt(CYBSP_USER_BTN2_PORT, CYBSP_USER_BTN2_PIN);
         NVIC_ClearPendingIRQ(CYBSP_USER_BTN2_IRQ);
     }
+}
+
+
+/*******************************************************************************
+* Function Name: radar_hud_update
+********************************************************************************
+* Summary:
+*   Draws the HUD page panel (page content, radar status, gesture toast) into
+*   the frame buffer and flushes the D-cache for the panel lines.
+*
+* Parameters:
+*  void
+*
+* Return:
+*  void
+*
+*******************************************************************************/
+static void radar_hud_update(void)
+{
+    radar_state_t st;
+    radar_hud_view_t view;
+
+    radar_task_get_state(&st);
+
+    switch (st.status)
+    {
+        case RADAR_STATUS_RUNNING:       view.mode = RADAR_HUD_MODE_OK;       break;
+        case RADAR_STATUS_NOT_AVAILABLE: view.mode = RADAR_HUD_MODE_NO_RADAR; break;
+        case RADAR_STATUS_ERROR:         view.mode = RADAR_HUD_MODE_ERROR;    break;
+        case RADAR_STATUS_INIT:
+        default:                         view.mode = RADAR_HUD_MODE_WAIT;     break;
+    }
+
+    view.page          = hud_page;
+    view.last_gesture  = hud_last_gesture;
+    view.toast         = (RADAR_GESTURE_NONE != hud_last_gesture) &&
+                         ((xTaskGetTickCount() - hud_toast_tick) < pdMS_TO_TICKS(RADAR_HUD_TOAST_MS));
+    view.present       = st.frame.present;
+    view.range_cm      = st.frame.range_cm;
+    view.azimuth_deg   = st.frame.azimuth_deg;
+    view.elevation_deg = st.frame.elevation_deg;
+
+    radar_hud_draw((uint16_t*)graphics_buffer, IMAGE_WIDTH, IMAGE_HEIGHT,
+                   RADAR_HUD_X, RADAR_HUD_Y, &view);
+
+#if defined(__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
+    /* Make the CPU writes visible to the display controller (whole lines) */
+    SCB_CleanDCache_by_Addr((volatile void*)&graphics_buffer[RADAR_HUD_Y * IMAGE_WIDTH * COLOR_DEPTH],
+                            (int32_t)(RADAR_HUD_HEIGHT * IMAGE_WIDTH * COLOR_DEPTH));
+#endif
+}
+
+
+/*******************************************************************************
+* Function Name: hud_apply_gesture
+********************************************************************************
+* Summary:
+*   Applies a gesture to the HUD: page change and toast. Returns true if the
+*   gesture requests the DSI ULPM (screen off) demo.
+*
+*******************************************************************************/
+static bool hud_apply_gesture(radar_gesture_t g)
+{
+    hud_page_t old_page = hud_page;
+
+    hud_page = radar_hud_next_page(hud_page, g);
+    hud_last_gesture = g;
+    hud_toast_tick = xTaskGetTickCount();
+
+    printf("HUD: %s -> page %u %s%s\r\n", radar_gesture_name(g),
+           (unsigned)hud_page + 1U, radar_hud_page_name(hud_page),
+           (old_page == hud_page) ? " (unchanged)" : "");
+
+    return (RADAR_PUSH_ENTERS_ULPM && (RADAR_GESTURE_PUSH == g));
 }
 
 
@@ -324,6 +431,8 @@ static void cm55_ns_gfx_task(void *arg)
     volatile cy_en_gfx_status_t status;
     volatile cy_en_mipidsi_status_t mipi_status;
     cy_en_sysint_status_t sysint_status = CY_SYSINT_SUCCESS;
+    TickType_t last_hud;
+    bool toast_shown = false;
 
     /* Initial delay to allow debounce delays to settle */
     Cy_SysLib_Delay(INITIAL_BTN_DEBOUNCE_DELAY);
@@ -393,6 +502,15 @@ static void cm55_ns_gfx_task(void *arg)
 
     memcpy(graphics_buffer, img_ptr, sizeof(img_ptr));
 
+    /* Start the 60 GHz radar gesture task (KIT_PSE84_AI only). Without a
+     * radar the HUD pages can still be switched with USER BTN2. */
+    if (CY_RSLT_SUCCESS != radar_task_start(RADAR_TASK_PRIORITY))
+    {
+        printf("Radar not started: use USER BTN2 to switch HUD pages\r\n");
+    }
+
+    radar_hud_update();
+
     /* Set the frame buffer with the image pointer to be displayed on LCD */
     status = Cy_GFXSS_Set_FrameBuffer(base, (uint32_t*)graphics_buffer, &gfx_context);
 
@@ -407,11 +525,53 @@ static void cm55_ns_gfx_task(void *arg)
     NVIC_EnableIRQ(user_btn1_irq_cfg.intrSrc);
 
     user_button_flag = false;
+    user_button2_flag = false;
 
     printf("Press USER BTN1 button to enter ULPM\r\n\n");
+    printf("Radar gestures: SWIPE LEFT/RIGHT = previous/next HUD page, "
+           "SWIPE UP = home, SWIPE DOWN = radar page, PUSH = ULPM\r\n\n");
+
+    last_hud = xTaskGetTickCount();
 
     for (;;)
     {
+        radar_gesture_t gesture;
+        bool redraw = false;
+
+        /* Radar gestures -> HUD page / ULPM request */
+        while (radar_task_get_gesture(&gesture))
+        {
+            if (hud_apply_gesture(gesture))
+            {
+                user_button_flag = true;
+            }
+            redraw = true;
+        }
+
+        /* USER BTN2 -> next page (same as SWIPE RIGHT) */
+        if (user_button2_flag)
+        {
+            user_button2_flag = false;
+            (void)hud_apply_gesture(RADAR_GESTURE_SWIPE_RIGHT);
+            redraw = true;
+        }
+
+        /* Redraw on change, periodically (live radar values) and once more
+         * when the gesture toast expires */
+        if (!dsi_in_ulpm)
+        {
+            bool toast_now = (RADAR_GESTURE_NONE != hud_last_gesture) &&
+                             ((xTaskGetTickCount() - hud_toast_tick) < pdMS_TO_TICKS(RADAR_HUD_TOAST_MS));
+
+            if (redraw || (toast_now != toast_shown) ||
+                ((xTaskGetTickCount() - last_hud) >= pdMS_TO_TICKS(RADAR_HUD_REFRESH_MS)))
+            {
+                toast_shown = toast_now;
+                last_hud = xTaskGetTickCount();
+                radar_hud_update();
+            }
+        }
+
         /* Check for the USER BTN1 interrupt status */
         if (user_button_flag)
         {
@@ -432,6 +592,7 @@ static void cm55_ns_gfx_task(void *arg)
                 handle_app_error();
             }
 
+            dsi_in_ulpm = true;
             Cy_GPIO_Write(CYBSP_USER_LED_PORT, CYBSP_USER_LED_PIN, GPIO_HIGH);
 
             vTaskDelay(pdMS_TO_TICKS(DSI_ULPM_TIME_INTERVAL_MS));
@@ -444,12 +605,20 @@ static void cm55_ns_gfx_task(void *arg)
                 handle_app_error();
             }
 
+            dsi_in_ulpm = false;
             Cy_GPIO_Write(CYBSP_USER_LED_PORT, CYBSP_USER_LED_PIN, GPIO_LOW);
             printf("Exited ULPM with SUCCESS: Press to enter again ULPM\r\n\n");
 
             /* Clear USER BTN1 interrupt flag */
             user_button_flag = false;
+
+            /* Gestures made while the screen was off are discarded */
+            while (radar_task_get_gesture(&gesture))
+            {
+            }
         }
+
+        vTaskDelay(pdMS_TO_TICKS(GFX_TASK_POLL_DELAY_MS));
     }
 }
 
