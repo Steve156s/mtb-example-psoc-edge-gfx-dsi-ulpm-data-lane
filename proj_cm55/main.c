@@ -54,6 +54,9 @@
 
 #include "infineon_logo.h"
 
+#include "imu_bmi270.h"
+#include "i2c_bus.h"
+
 
 /*******************************************************************************
 * Macros
@@ -68,6 +71,13 @@
 #define BTN_DEBOUNCE_DELAY_MS               (10U)
 
 #define DSI_ULPM_TIME_INTERVAL_MS           (6000U)
+
+/* Idle wait of the GFX task between button checks. Without it the
+ * highest-priority task spins and starves the IMU task. */
+#define GFX_TASK_POLL_DELAY_MS              (20U)
+
+/* Visible width of the Waveshare 4.3" panel; the buffer stride is IMAGE_WIDTH */
+#define DISPLAY_VISIBLE_WIDTH               (800U)
 
 #define SET_VAL                             (1U)
 
@@ -381,9 +391,11 @@ static void cm55_ns_gfx_task(void *arg)
     /* Enable the I2C */
     Cy_SCB_I2C_Enable(CYBSP_I2C_CONTROLLER_HW);
 
-    /* Initialize the display */
+    /* Initialize the display (holds the shared I2C bus while doing so) */
+    (void)i2c_bus_lock(I2C_BUS_WAIT_FOREVER);
     panel_status = mtb_disp_waveshare_4p3_init(CYBSP_I2C_CONTROLLER_HW,
                                                 &disp_i2c_controller_context);
+    i2c_bus_unlock();
 
     if (CY_RSLT_SUCCESS != panel_status)
     {
@@ -401,6 +413,24 @@ static void cm55_ns_gfx_task(void *arg)
     {
         printf("[%s: %d] Image rendering failed. Error type: %u\r\n", __func__, __LINE__, status);
         handle_app_error();
+    }
+
+    /* Start the BMI270 IMU service. It shares the display I2C controller
+     * (already initialised above) and draws pitch / roll / impact on the
+     * top-left corner of the frame buffer. */
+    {
+        const hud_surface_t hud =
+        {
+            .pixels = (uint16_t *)graphics_buffer,
+            .stride = IMAGE_WIDTH,
+            .width  = DISPLAY_VISIBLE_WIDTH,
+            .height = IMAGE_HEIGHT,
+        };
+
+        if (CY_RSLT_SUCCESS != imu_bmi270_start(&disp_i2c_controller_context, &hud))
+        {
+            printf("IMU task creation failed\r\n");
+        }
     }
 
     /* Enable USER BTN1 interrupt */
@@ -450,6 +480,9 @@ static void cm55_ns_gfx_task(void *arg)
             /* Clear USER BTN1 interrupt flag */
             user_button_flag = false;
         }
+
+        /* Yield so lower-priority tasks (IMU) can run */
+        vTaskDelay(pdMS_TO_TICKS(GFX_TASK_POLL_DELAY_MS));
     }
 }
 
@@ -498,6 +531,9 @@ int main(void)
 
     /* Enable global interrupts */
     __enable_irq();
+
+    /* Mutex for the I2C bus shared by display and sensors */
+    i2c_bus_init();
 
     /* Create the FreeRTOS Task */
     task_return = xTaskCreate(cm55_ns_gfx_task, GFX_TASK_NAME,

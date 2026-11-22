@@ -97,6 +97,24 @@ See [Using the code example](docs/using_the_code_example.md) for instructions on
    ![](images/dsi-ulpm-exit-terminal-output.png)
 
 
+## BMI270 IMU extension (HUD goggle prototype)
+
+> **Status:** not yet verified on hardware.
+
+The CM55 project additionally runs a BMI270 6-axis IMU service (`proj_cm55/imu/`):
+
+- Reads accelerometer (±16 g) and gyroscope (±2000 dps) at 50 Hz over `CYBSP_I2C_CONTROLLER` (the same I2C controller the display uses), via Infineon [sensor-motion-bmi270](https://github.com/Infineon/sensor-motion-bmi270) / Bosch BMI270_SensorAPI. Address 0x68 is tried first, then 0x69.
+- Calibrates gyro bias during the first second after boot (keep the kit still).
+- Computes pitch / roll with a complementary filter (accelerometer is ignored while |a| is outside 0.8–1.2 g).
+- Detects **free fall** (|a| < 0.35 g for 80 ms), **impact** (|a| ≥ 3.5 g) and **fall** (impact, then still for 1.5 s with ≥ 45° attitude change versus before the impact). Thresholds are first guesses in `imu_motion_default_cfg()` and must be tuned with recorded data.
+- Draws pitch, roll, |a| and the latest event in the top-left corner of the screen (10 Hz) and logs to the UART (2 Hz).
+
+Other modules can read the result with `imu_get_attitude(&pitch, &roll)` (e.g. tilt-compensated heading), `imu_get_state()` and `imu_take_events()`. Use `IMU_AXIS_REMAP` to map the sensor axes to the goggle frame.
+
+All transfers on `CYBSP_I2C_CONTROLLER` (display init, IMU) are serialised with the recursive mutex in `proj_cm55/i2c_bus.h` (`i2c_bus_lock()` / `i2c_bus_unlock()`); other sensors on that bus must use it too.
+
+The motion logic has no MCU dependencies and has a host test: `cd tools/imu_host_test && make`.
+
 ## Related resources
 
 Resources  | Links
