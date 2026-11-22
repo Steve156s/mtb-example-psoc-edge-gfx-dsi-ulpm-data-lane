@@ -97,6 +97,32 @@ See [Using the code example](docs/using_the_code_example.md) for instructions on
    ![](images/dsi-ulpm-exit-terminal-output.png)
 
 
+## 4-microphone capture (HUD goggle prototype)
+
+The CM55 application also captures all four on-board microphones at 16 kHz in 10 ms frames, shows a VU meter per channel on the LCD (right half, rows 200&ndash;350) and prints VU bars on the UART every 100 ms.
+
+Channel | Microphone | Path | Pins
+------- | ---------- | ---- | ----
+`D-L` / `D-R` | 2x IM73D122V01 digital PDM (27 mm apart) | PDM-PCM hardware: CIC /16 &rarr; FIR0 /3 &rarr; FIR1 /2, **24-bit** words, software gain to 16-bit (`Cy_PDM_PCM_ApplyPCM_Gain`) | CLK P8.5, DATA P8.6 (receivers 2 / 3)
+`A-1` / `A-2` | 2x IM73A135V01 analog | Autonomous Analog: CTB0 OpAmp0 / OpAmp1 preamps &rarr; HS SAR ADC (16x accumulate) &rarr; FIFO, paced by a 16 kHz TCPWM trigger | P14.0&ndash;P14.7
+
+- **Why 24-bit PDM:** AN242253 warns that with 16-bit output and more than 29 dB hardware gain the IM7x DC offset clips the left channel. The filter chain is the 24-bit one from Infineon&apos;s *mains-powered-local-voice* example; DC is removed in software
+- **Analog front end:** stereo version of the &quot;high quality AMIC&quot; configuration of Infineon&apos;s *battery-powered-local-voice* example. The 16 kHz timer (TCPWM0 counter 256), the trigger route to `pass.tr_lppass_in[3]` and the LPPASS pump clock are set up in code, so *design.modus* is unchanged
+- **Sound activity detection (VAD):** energy detector on the analog mics with an adaptive noise floor: starts at +12 dB over the floor for 30 ms, ends after 800 ms quiet (`mic_config.h`)
+- **Wake mode (USER BTN2):** PDM mics are stopped and only the analog mics listen; a VAD start turns the PDM mics on for at least 5 s. This is the software version of the hardware acoustic activity detection (PTComp + PRB) path in the battery-powered example, which is the next step for real low-power wake-up
+- **Frame hook:** `mic_task_frame_hook()` (weak) receives every 4-channel frame &ndash; the place to add noise reduction / AFE, wake word, or a PTT Codec2 encoder
+- Panel: `MIC  VAD/WAKE status  FLR <noise floor>`, then one bar per channel (green / yellow / red, white peak-hold marker, `CLIP` in red, `OFF` when the PDM mics sleep, `ERR` if a channel failed to start)
+
+  ![](images/mic-hud-preview.png)
+
+- UART example: `D-L -38 [####      ]  D-R -37 [####      ]  A-1 -45 [###       ]  A-2 -46 [###       ]  VAD- FLR -52`
+- Settings (gains, thresholds, wake hold time, UART period) are in *proj_cm55/mic/mic_config.h* and can be overridden with `DEFINES+=` in *proj_cm55/Makefile*. `MIC_ENABLE_PDM=0` / `MIC_ENABLE_ANALOG=0` build without one microphone type
+- Sources: *proj_cm55/mic/* &ndash; `mic_pdm.c` (PDM driver), `mic_analog.c` (Autonomous Analog driver), `mic_level.c` (DC blocker, RMS/peak dBFS, VU ballistics, VAD &ndash; integer only), `mic_hud.c` (panel renderer), `mic_task.c` (FreeRTOS task, wake logic, UART)
+- Host test without ModusToolbox: `cd tools/mic_host_test && make` (level/VAD unit tests + writes the panel preview)
+
+> **Not verified on hardware yet.** Gains (`MIC_PDM_SW_GAIN_DB`, `MIC_PDM_HW_GAIN`), the analog preamp configuration and the VAD thresholds are starting values and must be tuned on KIT_PSE84_AI / KIT_PSE84_EVAL. The repository default `TARGET` is still `KIT_PSE84_EVAL_EPC2`; both kits have the same microphone pins.
+
+
 ## Related resources
 
 Resources  | Links
