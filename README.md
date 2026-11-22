@@ -97,6 +97,40 @@ See [Using the code example](docs/using_the_code_example.md) for instructions on
    ![](images/dsi-ulpm-exit-terminal-output.png)
 
 
+## RTC clock (WCO 32.768 kHz) on the HUD (goggle prototype)
+
+The CM55 application shows a clock panel on the right side of the LCD (x 448, y 196, 336 x 150 px). The PSOC Edge RTC runs from the 32.768 kHz watch crystal (WCO, P18.0 `WCO_OUT` / P18.1 `WCO_IN`) through the backup domain clock (`CLK_BAK = WCO` in the BSP), so it keeps counting in Deep Sleep, Hibernate and across a warm reset.
+
+![](images/rtc-hud-preview.png)
+
+Line | Content
+---- | -------
+`CLOCK  UTC+08:00` | Time zone (default `RTC_DEFAULT_TZ_MIN` = +8:00, Taiwan)
+`10:05 09` | Local time, 7-segment HH:MM and seconds (redrawn when the second changes)
+`2026-11-22 SUN` | Local date and day of week
+`SYNC GNSS 3M` | Source and age of the last sync: `NONE`, `KEPT` (set before the last reset), `UART`, `PHONE`, `GNSS`. `SET TIME: UART T CMD` (amber `--:--`) until the clock has been set, `WCO FAIL` if the crystal does not run
+
+- The RTC holds **UTC**; the HUD shows UTC + time zone. Any date before 2025 means "never set" (the BSP default is 2024-01-01 12:00)
+- *proj_cm33_ns/main.c* now loads the BSP default date only when the RTC does not hold a valid time, so a reset no longer loses the time
+- **Set the time on the UART** (KitProg3 USB-UART, 115200 8N1, local echo):
+
+  Command | Meaning
+  ------- | -------
+  `T 2026-11-22 10:30:00` | Set local time (seconds optional)
+  `U 1795341909` | Set UTC as Unix time (the format GNSS / phone sync will use)
+  `Z +8`, `Z -3:30`, `Z +0545` | Time zone (RAM only, back to the default after reset)
+  `C +2.5` | Crystal correction in ppm, + = crystal slow (RTC calibration, 1.085 ppm steps)
+  `L 1` / `L 0` | Low-power clock mode on / off
+  `S` or `?`, `H` | Status line, help
+- **Future sync sources**: call `rtc_clock_sync_from_gnss(unix_utc)` (Tracker GNSS over Bluetooth) or `rtc_clock_sync_from_phone(unix_utc, tz_min)` (phone App). A better source wins (GNSS > phone > UART), a lower one is accepted again after `RTC_SYNC_STALE_S` (6 h); a manual UART set always wins; steps under 2 s are not written to avoid a visible jump
+- **Deep Sleep wake-up**: RTC ALARM1 fires at second 00 of every minute (`srss_interrupt_rtc_IRQn`, owned by the CM55). In the low-power clock mode (`L 1`) the DSI data lane stays in ULPM and the graphics task blocks on the alarm, so FreeRTOS tickless idle puts the CM55 into Deep Sleep; each minute the panel is redrawn and shown for 3 s
+- The SCB UART cannot receive in Deep Sleep: while the console is awake a SysPm callback refuses Deep Sleep (normal mode always; low-power mode for 5 s after each minute alarm or received character). Disable with `DEFINES+=RTC_CONSOLE_BLOCK_DEEPSLEEP=0`
+- The graphics task now waits 20 ms per loop (`GFX_TASK_POLL_DELAY_MS`) so that it does not starve the console task
+- Sources: *proj_cm55/rtc/* (`rtc_clock.c` = RTC / WCO / alarm / sync, `rtc_console.c` = UART console and Deep Sleep policy, `rtc_time.c` = calendar, time zone and command parser, `rtc_hud.c` = panel renderer). Settings in *rtc_clock.h* / *rtc_console.h*, override with `DEFINES+=...` in *proj_cm55/Makefile*
+- Host unit test of the calendar / parser / renderer (no ModusToolbox needed): `make -C tools/rtc_host_test run`
+- **Not yet verified on hardware** (no board in the cloud build): check that the CM55 may write the RTC registers and own `srss_interrupt_rtc_IRQn`, the actual Deep Sleep current, and the WCO start-up on KIT_PSE84_AI
+
+
 ## Related resources
 
 Resources  | Links

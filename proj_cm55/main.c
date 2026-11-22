@@ -39,6 +39,9 @@
 /*******************************************************************************
 * Header Files
 *******************************************************************************/
+#include <stdio.h>
+#include <string.h>
+
 #include "cy_graphics.h"
 
 #include "cy_time.h"
@@ -54,13 +57,18 @@
 
 #include "infineon_logo.h"
 
+#include "rtc_clock.h"
+#include "rtc_console.h"
+#include "rtc_hud.h"
+
 
 /*******************************************************************************
 * Macros
 *******************************************************************************/
 #define GFX_TASK_NAME                       ("CM55 Gfx Task")
 /* stack size in words */
-#define GFX_TASK_STACK_SIZE                 (configMINIMAL_STACK_SIZE * 3)
+/* Increased from 3x to 5x for snprintf used by the RTC clock panel */
+#define GFX_TASK_STACK_SIZE                 (configMINIMAL_STACK_SIZE * 5)
 
 #define GFX_TASK_PRIORITY                   (configMAX_PRIORITIES - 1)
 
@@ -87,6 +95,22 @@
  */
 #define APP_LPTIMER_INTERRUPT_PRIORITY      (1U)
 
+/* RTC clock panel: position on the 800 x 480 panel (right side, middle band;
+ * the other sensor demos use the top-left, top-right, left-middle and bottom
+ * areas), UART console task priority (below the graphics task). */
+#define RTC_HUD_X                           (448U)
+#define RTC_HUD_Y                           (196U)
+#define RTC_CONSOLE_PRIORITY                (configMAX_PRIORITIES - 2)
+
+/* Idle wait of the GFX task between checks. Without it the highest priority
+ * GFX task spins and starves the RTC console task. */
+#define GFX_TASK_POLL_DELAY_MS              (20U)
+
+/* Low-power clock mode ("L 1" on the UART): the DSI data lane stays in ULPM
+ * and the CPU sleeps until the RTC minute alarm; each minute the panel is
+ * redrawn and shown for RTC_LP_GLANCE_MS. */
+#define RTC_LP_GLANCE_MS                    (3000U)
+
 
 /*******************************************************************************
 * Global Variables
@@ -96,6 +120,12 @@ GFXSS_Type* base = (GFXSS_Type*) GFXSS;
 cy_stc_gfx_context_t gfx_context;
 
 volatile bool user_button_flag = false;
+
+/* true while the DSI data lane is in ULPM: the clock panel is not redrawn */
+static bool dsi_in_ulpm = false;
+
+/* Low-power clock mode requested from the UART console */
+static volatile bool rtc_lp_request = false;
 
 CY_SECTION(".cy_gpu_buf") uint8_t graphics_buffer[IMAGE_SIZE] = {0xFF};
 
@@ -297,6 +327,119 @@ static void button_isr_handler(void)
 
 
 /*******************************************************************************
+* Function Name: rtc_hud_update
+********************************************************************************
+* Summary:
+*   Draws the clock panel (local time, date, time zone, sync source) into the
+*   frame buffer and flushes the D-cache for the panel lines.
+*
+* Parameters:
+*  st        : clock snapshot from rtc_clock_get_state()
+*  low_power : true in the low-power clock mode (seconds hidden)
+*
+* Return:
+*  void
+*
+*******************************************************************************/
+static void rtc_hud_update(const rtc_clock_state_t *st, bool low_power)
+{
+    rtc_hud_view_t view;
+
+    view.local      = st->local;
+    view.tz_min     = st->tz_min;
+    view.time_valid = st->time_valid;
+    view.wco_ok     = st->wco_ok && st->bak_is_wco;
+    view.low_power  = low_power;
+    view.src_name   = rtc_clock_src_name(st->src);
+    view.sync_age_s = st->sync_age_s;
+
+    rtc_hud_draw((uint16_t*)graphics_buffer, IMAGE_WIDTH, IMAGE_HEIGHT,
+                 RTC_HUD_X, RTC_HUD_Y, &view);
+
+#if defined(__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
+    /* Make the CPU writes visible to the display controller (whole lines) */
+    SCB_CleanDCache_by_Addr((volatile void*)&graphics_buffer[RTC_HUD_Y * IMAGE_WIDTH * COLOR_DEPTH],
+                            (int32_t)(RTC_HUD_HEIGHT * IMAGE_WIDTH * COLOR_DEPTH));
+#endif
+}
+
+
+/*******************************************************************************
+* Function Name: rtc_lp_cb
+********************************************************************************
+* Summary:
+*   UART console callback for "L 1" / "L 0" (runs in the console task).
+*
+*******************************************************************************/
+static void rtc_lp_cb(bool enable)
+{
+    rtc_lp_request = enable;
+    printf("RTC: low-power clock mode %s\r\n", enable ? "ON (display off, "
+           "wake every minute)" : "OFF");
+    /* leave rtc_clock_wait_minute() at once */
+    rtc_clock_wake_waiter();
+}
+
+
+/*******************************************************************************
+* Function Name: rtc_low_power_clock
+********************************************************************************
+* Summary:
+*   Low-power clock mode. The DSI data lane goes to ULPM, the task blocks on
+*   the RTC ALARM1 (second 00) so FreeRTOS tickless idle puts the CM55 into
+*   Deep Sleep. Each minute: exit ULPM, redraw, show for RTC_LP_GLANCE_MS,
+*   enter ULPM again. Returns when "L 0" is received.
+*
+*******************************************************************************/
+static void rtc_low_power_clock(void)
+{
+    rtc_clock_state_t st;
+    cy_en_mipidsi_status_t mipi_status;
+
+    /* drop a stale alarm / wake so the first wait really sleeps */
+    (void)rtc_clock_wait_minute(0U);
+
+    while (rtc_lp_request)
+    {
+        rtc_clock_get_state(&st);
+        rtc_hud_update(&st, true);
+
+        mipi_status = Cy_MIPIDSI_EnterULPM_Data(GFXSS_GFXSS_MIPIDSI);
+        if (CY_MIPIDSI_SUCCESS != mipi_status)
+        {
+            printf("[%s: %d] ULPM entry failed: %u\r\n", __func__, __LINE__, mipi_status);
+            handle_app_error();
+        }
+        dsi_in_ulpm = true;
+        Cy_GPIO_Write(CYBSP_USER_LED_PORT, CYBSP_USER_LED_PIN, GPIO_HIGH);
+
+        /* CPU sleeps here (Deep Sleep when the UART console window is closed) */
+        (void)rtc_clock_wait_minute(RTC_WAIT_FOREVER);
+
+        mipi_status = Cy_MIPIDSI_ExitULPM_Data(GFXSS_GFXSS_MIPIDSI);
+        if (CY_MIPIDSI_SUCCESS != mipi_status)
+        {
+            printf("[%s: %d] ULPM exit failed: %u\r\n", __func__, __LINE__, mipi_status);
+            handle_app_error();
+        }
+        dsi_in_ulpm = false;
+        Cy_GPIO_Write(CYBSP_USER_LED_PORT, CYBSP_USER_LED_PIN, GPIO_LOW);
+
+        rtc_clock_get_state(&st);
+        rtc_hud_update(&st, rtc_lp_request);
+        rtc_console_print_status();
+
+        if (rtc_lp_request)
+        {
+            /* glance: show the new minute, keep the UART console open */
+            rtc_console_open_window(RTC_LP_GLANCE_MS + 2000U);
+            vTaskDelay(pdMS_TO_TICKS(RTC_LP_GLANCE_MS));
+        }
+    }
+}
+
+
+/*******************************************************************************
 * Function Name: cm55_ns_gfx_task
 ********************************************************************************
 * Summary:
@@ -324,6 +467,9 @@ static void cm55_ns_gfx_task(void *arg)
     volatile cy_en_gfx_status_t status;
     volatile cy_en_mipidsi_status_t mipi_status;
     cy_en_sysint_status_t sysint_status = CY_SYSINT_SUCCESS;
+    rtc_clock_state_t rtc_st;
+    uint8_t last_sec = 0xFFU;
+    uint8_t last_min = 0xFFU;
 
     /* Initial delay to allow debounce delays to settle */
     Cy_SysLib_Delay(INITIAL_BTN_DEBOUNCE_DELAY);
@@ -393,6 +539,21 @@ static void cm55_ns_gfx_task(void *arg)
 
     memcpy(graphics_buffer, img_ptr, sizeof(img_ptr));
 
+    /* RTC clock: WCO / backup clock check, minute alarm, UART console.
+     * A failure is not fatal: the panel then shows the error state. */
+    if (CY_RSLT_SUCCESS != rtc_clock_init())
+    {
+        printf("RTC clock init failed\r\n");
+    }
+    rtc_clock_get_state(&rtc_st);
+    rtc_hud_update(&rtc_st, false);
+    rtc_console_print_status();
+
+    if (CY_RSLT_SUCCESS != rtc_console_start(RTC_CONSOLE_PRIORITY, rtc_lp_cb))
+    {
+        printf("RTC console start failed\r\n");
+    }
+
     /* Set the frame buffer with the image pointer to be displayed on LCD */
     status = Cy_GFXSS_Set_FrameBuffer(base, (uint32_t*)graphics_buffer, &gfx_context);
 
@@ -412,6 +573,29 @@ static void cm55_ns_gfx_task(void *arg)
 
     for (;;)
     {
+        /* Low-power clock mode requested on the UART ("L 1") */
+        if (rtc_lp_request)
+        {
+            rtc_low_power_clock();
+            last_sec = 0xFFU;
+        }
+
+        /* Redraw the clock panel when the second changes; log once a minute */
+        if (!dsi_in_ulpm)
+        {
+            rtc_clock_get_state(&rtc_st);
+            if (rtc_st.local.sec != last_sec)
+            {
+                last_sec = rtc_st.local.sec;
+                rtc_hud_update(&rtc_st, false);
+                if (rtc_st.local.min != last_min)
+                {
+                    last_min = rtc_st.local.min;
+                    rtc_console_print_status();
+                }
+            }
+        }
+
         /* Check for the USER BTN1 interrupt status */
         if (user_button_flag)
         {
@@ -432,6 +616,7 @@ static void cm55_ns_gfx_task(void *arg)
                 handle_app_error();
             }
 
+            dsi_in_ulpm = true;
             Cy_GPIO_Write(CYBSP_USER_LED_PORT, CYBSP_USER_LED_PIN, GPIO_HIGH);
 
             vTaskDelay(pdMS_TO_TICKS(DSI_ULPM_TIME_INTERVAL_MS));
@@ -444,12 +629,15 @@ static void cm55_ns_gfx_task(void *arg)
                 handle_app_error();
             }
 
+            dsi_in_ulpm = false;
             Cy_GPIO_Write(CYBSP_USER_LED_PORT, CYBSP_USER_LED_PIN, GPIO_LOW);
             printf("Exited ULPM with SUCCESS: Press to enter again ULPM\r\n\n");
 
             /* Clear USER BTN1 interrupt flag */
             user_button_flag = false;
         }
+
+        vTaskDelay(pdMS_TO_TICKS(GFX_TASK_POLL_DELAY_MS));
     }
 }
 
