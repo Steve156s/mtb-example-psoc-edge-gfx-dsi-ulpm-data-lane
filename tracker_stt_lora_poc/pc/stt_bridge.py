@@ -9,6 +9,9 @@ E84 forwards TEXT to Heltec and reports TX_RESULT, which is printed here.
     pip install pyserial faster-whisper opencc-python-reimplemented numpy
     python stt_bridge.py COM4 --baud 921600 --model small
     python stt_bridge.py COM4 --typed      # no STT: type text, E84 forwards it
+    python stt_bridge.py COM4 --pc-mic     # STT from the PC microphone (Enter to
+                                           # start/stop), before the E84 mic works
+                                           # needs: pip install sounddevice
 """
 import argparse
 import os
@@ -60,6 +63,7 @@ def main():
     ap.add_argument("--baud", type=int, default=921600)
     ap.add_argument("--model", default="small", help="tiny / base / small / medium")
     ap.add_argument("--typed", action="store_true", help="skip STT, type text instead")
+    ap.add_argument("--pc-mic", action="store_true", help="record from the PC microphone instead of the E84")
     ap.add_argument("--wav-dir", default="recordings")
     args = ap.parse_args()
 
@@ -77,7 +81,25 @@ def main():
     stt = None if args.typed else load_stt(args.model)
     os.makedirs(args.wav_dir, exist_ok=True)
 
-    if args.typed:
+    if args.pc_mic:
+        def pc_mic_loop():
+            import sounddevice as sd
+            while True:
+                input("Press Enter to start talking...")
+                frames = []
+                with sd.InputStream(samplerate=16000, channels=1, dtype="int16",
+                                    callback=lambda d, n, t, st: frames.append(d.copy())):
+                    input("  recording... press Enter to stop")
+                pcm = np.concatenate(frames)[:, 0] if frames else np.zeros(0, dtype=np.int16)
+                wav = os.path.join(args.wav_dir, time.strftime("pcmic-%Y%m%d-%H%M%S.wav"))
+                save_wav(wav, pcm, 16000)
+                t0 = time.time()
+                text = stt(pcm, 16000) if len(pcm) else ""
+                print(f"  STT {time.time() - t0:.1f} s: {text!r}")
+                if text:
+                    send_text(text)
+        threading.Thread(target=pc_mic_loop, daemon=True).start()
+    elif args.typed:
         def typer():
             while True:
                 line = sys.stdin.readline().strip()
@@ -85,7 +107,7 @@ def main():
                     send_text(line)
         threading.Thread(target=typer, daemon=True).start()
         print("Typed mode: enter text lines.")
-    else:
+    if not (args.typed or args.pc_mic):
         print("Ready. Hold the PTT button on the E84, speak, release.")
 
     dec = lf.Decoder()

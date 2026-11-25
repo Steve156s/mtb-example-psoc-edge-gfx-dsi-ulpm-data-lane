@@ -11,7 +11,10 @@
  * - Every TEXT/CMD goes out with want-ack; up to 3 retries. The result is
  *   reported back as TX_RESULT on the port it came from.
  * - Every packet received is ACKed, de-duplicated by (src, seq), shown on the
- *   TFT, and sent to USB Serial as RX_TEXT (pc/rx_viewer.py prints it).
+ *   TFT, and printed on USB Serial. USB_PLAIN_TEXT 1 (default): a readable
+ *   UTF-8 line "[RX] node 1 seq 3 RSSI -42 dBm SNR 9 dB | <text>" that any
+ *   serial terminal shows (115200, UTF-8). USB_PLAIN_TEXT 0: binary RX_TEXT
+ *   frames for pc/rx_viewer.py --frames.
  *
  * Libraries: RadioLib (>= 7.x), Adafruit ST7735 and ST7789, Adafruit GFX.
  * Board: "Heltec Wireless Tracker" or "ESP32S3 Dev Module", USB CDC On Boot = Enabled.
@@ -33,6 +36,9 @@
 #define NODE_ID          1        /* 1 = sender next to E84, 2 = receiver */
 #endif
 #define NET_ID           0x42     /* group id, must match on both nodes */
+#ifndef USB_PLAIN_TEXT
+#define USB_PLAIN_TEXT   1        /* 1 = readable lines on USB, 0 = RX_TEXT frames */
+#endif
 
 /* ---------- radio settings (Taiwan 920-925 MHz) ---------- */
 #define LORA_FREQ_MHZ    923.2
@@ -95,6 +101,9 @@ static void sendFrame(Stream &port, uint8_t type, uint8_t seq, const uint8_t *p,
 
 static void logTo(Stream &port, const char *msg)
 {
+#if USB_PLAIN_TEXT
+    if (&port == &Serial) { Serial.printf("[log] %s\r\n", msg); return; }
+#endif
     sendFrame(port, LINK_T_LOG, 0, (const uint8_t *)msg, (uint16_t)strlen(msg));
 }
 
@@ -181,6 +190,15 @@ static void loraSend(Stream &port, uint8_t uartSeq, uint8_t lpType, const uint8_
     res[3] = (uint8_t)(toa >> 8);
     res[4] = tries > MAX_RETRIES ? MAX_RETRIES : tries;
     sendFrame(port, LINK_T_TX_RESULT, uartSeq, res, sizeof res);
+#if USB_PLAIN_TEXT
+    if (&port != &Serial)
+    {
+        Serial.printf("[TX] seq %u %s, air %lu ms, retries %u | %.*s\r\n", (unsigned)pkt.seq,
+                      status == LINK_TX_OK_ACKED ? "acked" : "NO ACK", (unsigned long)toa,
+                      (unsigned)res[4], lpType == LP_T_CMD ? 3 : (int)len,
+                      lpType == LP_T_CMD ? "CMD" : (const char *)p);
+    }
+#endif
     showStatus(status == LINK_TX_OK_ACKED ? "TX ok (acked)" : "TX no ack", "");
 }
 
@@ -230,7 +248,12 @@ static bool handleAirPacket(const uint8_t *buf, size_t len, int16_t rssi, int8_t
     {
         memcpy(&out[4], p.payload, tl);
     }
+#if USB_PLAIN_TEXT
+    Serial.printf("[RX] node %u seq %u RSSI %d dBm SNR %d dB | %.*s\r\n", (unsigned)p.src,
+                  (unsigned)p.seq, (int)rssi, (int)snr, (int)tl, (const char *)&out[4]);
+#else
     sendFrame(Serial, LINK_T_RX_TEXT, p.seq, out, (uint16_t)(4 + tl));
+#endif
 
     char l1[32], l2[64];
     snprintf(l1, sizeof l1, "from %u  %ddBm %ddB", p.src, rssi, snr);

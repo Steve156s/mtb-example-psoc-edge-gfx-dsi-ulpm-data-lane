@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """Receiver side: print what the receiving Heltec got (Chinese text, RSSI, SNR).
 
-    python rx_viewer.py COM6
+Default: the Heltec prints readable UTF-8 lines (USB_PLAIN_TEXT 1), so any
+serial terminal works too (115200, UTF-8). This script adds a timestamp and
+maps command ids (#3) to phrases.
+
+    python rx_viewer.py COM6            # plain lines (default firmware)
+    python rx_viewer.py COM6 --frames   # firmware built with USB_PLAIN_TEXT 0
 """
 import datetime
+import re
 import struct
 import sys
 
@@ -17,10 +23,27 @@ COMMANDS = {
 }
 
 
+def plain(port):
+    buf = b""
+    while True:
+        buf += port.read(512)
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            text = line.decode("utf-8", errors="replace").rstrip("\r")
+            if not text:
+                continue
+            m = re.search(r"\| #(\d+)$", text)
+            if m:
+                text += f"  ({COMMANDS.get(int(m.group(1)), '未知指令')})"
+            print(f"[{datetime.datetime.now():%H:%M:%S}] {text}", flush=True)
+
+
 def main():
     port = serial.Serial(sys.argv[1], 115200, timeout=0.1)
-    dec = lf.Decoder()
     print("Waiting for LoRa messages...")
+    if "--frames" not in sys.argv[2:]:
+        plain(port)
+    dec = lf.Decoder()
     while True:
         for ftype, seq, p in dec.feed(port.read(512)):
             now = datetime.datetime.now().strftime("%H:%M:%S")

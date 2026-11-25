@@ -9,8 +9,10 @@
 *      recording then takes ~22 s to upload. Match --baud in stt_bridge.py.
 *   2. Heltec UART: enable a free SCB as UART 115200 8N1 and give it the
 *      name HELTEC_UART so the generated symbols are CYBSP_HELTEC_UART_HW /
-*      CYBSP_HELTEC_UART_config. Pins: J7 P17.0/P17.1 (3.3 V, if that SCB
-*      offers UART there) or J5 (1.8 V, through a TXB0104 level shifter).
+*      CYBSP_HELTEC_UART_config. Use SCB10 on J14: P16.0 = RX (J14 pin 6),
+*      P16.1 = TX (J14 pin 5), GND = J14 pin 20. P16 is a 3.3 V port, so the
+*      Heltec connects directly. First untick CYBSP_DVP_CAM_D0/D1 on those
+*      pins (the BSP assigns them to the DVP camera).
 *   3. PTT button: CYBSP_USER_BTN (SW1). If another task already owns the
 *      button interrupt, change STT_LINK_PTT_PORT/PIN.
 *
